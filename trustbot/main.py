@@ -21,7 +21,6 @@ from trustbot.config import settings
 from trustbot.index.code_index import CodeIndex
 from trustbot.tools.base import ToolRegistry
 from trustbot.tools.filesystem_tool import FilesystemTool
-from trustbot.tools.index_tool import IndexTool
 from trustbot.tools.neo4j_tool import Neo4jTool
 from trustbot.ui.app import create_ui
 
@@ -39,11 +38,18 @@ async def initialize_app() -> tuple[ToolRegistry, CodeIndex]:
     # Register tools
     neo4j_tool = Neo4jTool()
     fs_tool = FilesystemTool()
-    index_tool = IndexTool()
 
     registry.register(neo4j_tool)
     registry.register(fs_tool)
-    registry.register(index_tool)
+
+    # Optional: IndexTool (ChromaDB) - may fail on Python 3.14
+    try:
+        from trustbot.tools.index_tool import IndexTool
+        index_tool = IndexTool()
+        registry.register(index_tool)
+        logger.info("Index tool registered (ChromaDB)")
+    except Exception as e:
+        logger.warning("Index tool skipped (ChromaDB error: %s)", str(e)[:100])
 
     # Optional: Browser tool for E2E testing (disabled by default to avoid launching browser)
     if settings.enable_browser_tool:

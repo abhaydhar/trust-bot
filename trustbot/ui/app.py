@@ -69,6 +69,9 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
     async def run_reindex(force: bool):
         try:
             index_tool = registry.get("index")
+        except KeyError:
+            return "Index tool not available (ChromaDB not loaded)"
+        try:
             stats = await index_tool.call("reindex", force=force)
             return (
                 f"Indexing complete.\n"
@@ -83,6 +86,9 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
     async def get_status():
         try:
             index_tool = registry.get("index")
+        except KeyError:
+            return "Index tool not available (ChromaDB not loaded)"
+        try:
             status = await index_tool.call("get_index_status")
             return json.dumps(status, indent=2)
         except Exception as e:
