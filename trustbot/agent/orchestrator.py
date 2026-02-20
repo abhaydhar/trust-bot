@@ -213,7 +213,7 @@ class AgentOrchestrator:
         return report, summary
 
     async def process_project(
-        self, project_id: int, run_id: int
+        self, project_id: int, run_id: int, progress_callback=None
     ) -> tuple[ProjectValidationReport, str]:
         """
         Validate ALL execution flows for a project_id + run_id.
@@ -239,7 +239,11 @@ class AgentOrchestrator:
             project_id=project_id, run_id=run_id
         )
 
-        for call_graph in project_graph.call_graphs:
+        total_flows = len(project_graph.call_graphs)
+        for idx, call_graph in enumerate(project_graph.call_graphs):
+            if progress_callback:
+                progress_callback(idx, total_flows)
+            
             logger.info(
                 "Validating flow: %s (%d snippets, %d edges)",
                 call_graph.execution_flow.name,

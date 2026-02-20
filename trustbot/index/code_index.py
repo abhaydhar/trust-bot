@@ -14,8 +14,8 @@ from datetime import datetime
 from pathlib import Path
 
 from trustbot.config import settings
-from trustbot.indexing.chunker import chunk_file, LANGUAGE_MAP
-from trustbot.tools.filesystem_tool import CODE_EXTENSIONS, IGNORED_DIRS
+from trustbot.indexing.chunker import chunk_file, LANGUAGE_MAP, CODE_EXTENSIONS
+from trustbot.tools.filesystem_tool import IGNORED_DIRS
 
 logger = logging.getLogger("trustbot.index")
 
@@ -29,6 +29,7 @@ class CodeIndex:
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or (settings.codebase_root / ".trustbot_code_index.db")
         self._conn: sqlite3.Connection | None = None
+        self._schema_migrated = False  # Track if migration happened
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -38,19 +39,50 @@ class CodeIndex:
         return self._conn
 
     def _init_schema(self) -> None:
-        conn = self._get_conn()
+        if self._schema_migrated:
+            return  # Already migrated, don't check again
+            
+        conn = self._conn
+        
+        # Check if old schema exists (with function_name as PRIMARY KEY)
+        cursor = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='code_index'")
+        existing_schema = cursor.fetchone()
+        
+        # If old schema exists (function_name TEXT PRIMARY KEY), drop and recreate
+        if existing_schema and 'function_name TEXT PRIMARY KEY' in existing_schema[0]:
+            logger.info("Migrating code_index to new schema (function_name + file_path uniqueness)")
+            conn.execute("DROP TABLE code_index")
+            self._schema_migrated = True
+        
+        # Create table with new schema
         conn.execute("""
             CREATE TABLE IF NOT EXISTS code_index (
-                function_name TEXT PRIMARY KEY,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                function_name TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 language TEXT NOT NULL,
                 class_name TEXT,
-                last_indexed TIMESTAMP
+                last_indexed TIMESTAMP,
+                UNIQUE(function_name, file_path)
             )
         """)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_function_name ON code_index(function_name)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_path ON code_index(file_path)"
+        )
+        
+        # Call edges table for storing call graph relationships
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS call_edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caller TEXT NOT NULL,
+                callee TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                UNIQUE(caller, callee)
+            )
+        """)
         conn.commit()
 
     def build(self, codebase_root: Path | None = None) -> dict:
@@ -94,14 +126,18 @@ class CodeIndex:
                     name = chunk.function_name or chunk.class_name
                     if not name:
                         continue
-                    conn.execute(
-                        """
-                        INSERT OR REPLACE INTO code_index
-                        (function_name, file_path, language, class_name, last_indexed)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (name, rel_path, lang, chunk.class_name or "", start.isoformat()),
-                    )
+                    try:
+                        conn.execute(
+                            """
+                            INSERT INTO code_index
+                            (function_name, file_path, language, class_name, last_indexed)
+                            VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (name, rel_path, lang, chunk.class_name or "", start.isoformat()),
+                        )
+                    except sqlite3.IntegrityError:
+                        # Duplicate (function_name, file_path) pair - skip
+                        continue
                     total_functions += 1
                 total_files += 1
 
@@ -140,6 +176,32 @@ class CodeIndex:
     def lookup_all(self, function_names: list[str]) -> dict[str, str | None]:
         """Batch lookup. Returns dict of name -> file_path (or None)."""
         return {name: self.lookup(name) for name in function_names}
+
+    def store_edges(self, edges: list[tuple[str, str, float]]) -> int:
+        """
+        Store call graph edges. Each edge is (caller, callee, confidence).
+        Returns number of edges stored.
+        """
+        conn = self._get_conn()
+        conn.execute("DELETE FROM call_edges")
+        count = 0
+        for caller, callee, confidence in edges:
+            try:
+                conn.execute(
+                    "INSERT INTO call_edges (caller, callee, confidence) VALUES (?, ?, ?)",
+                    (caller, callee, confidence),
+                )
+                count += 1
+            except Exception:
+                continue
+        conn.commit()
+        return count
+
+    def get_edges(self) -> list[dict]:
+        """Return all stored call graph edges."""
+        conn = self._get_conn()
+        rows = conn.execute("SELECT caller, callee, confidence FROM call_edges").fetchall()
+        return [{"from": r[0], "to": r[1], "confidence": r[2]} for r in rows]
 
     def close(self) -> None:
         """Close the database connection."""

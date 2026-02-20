@@ -22,6 +22,13 @@ CODE_EXTENSIONS = {
     ".py", ".java", ".js", ".ts", ".jsx", ".tsx", ".cs",
     ".go", ".kt", ".rb", ".rs", ".cpp", ".c", ".h", ".hpp",
     ".scala", ".swift", ".php",
+    # Delphi/Pascal
+    ".pas", ".dpr", ".dfm", ".inc",
+    # Legacy/Mainframe
+    ".cbl", ".cob",  # COBOL
+    ".rpg", ".rpgle",  # RPG
+    ".nat",  # Natural
+    ".foc",  # FOCUS
 }
 
 LANGUAGE_MAP = {
@@ -29,6 +36,13 @@ LANGUAGE_MAP = {
     ".jsx": "javascript", ".tsx": "typescript", ".cs": "csharp", ".go": "go",
     ".kt": "kotlin", ".rb": "ruby", ".rs": "rust", ".cpp": "cpp", ".c": "c",
     ".h": "c", ".hpp": "cpp", ".scala": "scala", ".swift": "swift", ".php": "php",
+    # Delphi/Pascal
+    ".pas": "delphi", ".dpr": "delphi", ".dfm": "delphi", ".inc": "delphi",
+    # Legacy/Mainframe
+    ".cbl": "cobol", ".cob": "cobol",
+    ".rpg": "rpg", ".rpgle": "rpg",
+    ".nat": "natural",
+    ".foc": "focus",
 }
 
 # Regex patterns to find function/method definitions per language.
@@ -56,6 +70,26 @@ FUNC_DEF_PATTERNS: dict[str, list[re.Pattern]] = {
         re.compile(r"(?:export\s+)?(?:const|let|var)\s+(?P<name>\w+)\s*=\s*(?:async\s+)?\(", re.MULTILINE),
         re.compile(r"(?:export\s+)?class\s+(?P<name>\w+)", re.MULTILINE),
         re.compile(r"(?:export\s+)?interface\s+(?P<name>\w+)", re.MULTILINE),
+    ],
+    "delphi": [
+        # Delphi function/procedure patterns
+        re.compile(r"^\s*(?:function|procedure)\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
+        re.compile(r"^\s*constructor\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
+        re.compile(r"^\s*destructor\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
+    ],
+    "cobol": [
+        # COBOL paragraph/section patterns
+        re.compile(r"^\s*(?P<name>[A-Z0-9\-]+)\s+(?:SECTION|DIVISION)\.", re.MULTILINE),
+        re.compile(r"^\s*(?P<name>[A-Z0-9\-]+)\.\s*$", re.MULTILINE),
+    ],
+    "rpg": [
+        # RPG procedure patterns
+        re.compile(r"^\s*DCL-PROC\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
+        re.compile(r"^\s*BEGSR\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
+    ],
+    "natural": [
+        # Natural subroutine patterns
+        re.compile(r"^\s*DEFINE\s+(?:SUBROUTINE|FUNCTION)\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
     ],
     "csharp": [
         re.compile(

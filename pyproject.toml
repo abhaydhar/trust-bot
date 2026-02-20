@@ -24,6 +24,8 @@ dependencies = [
     "redis>=5.0.0",
     # Browser control & E2E testing
     "playwright>=1.49.0",
+    # Git repository support
+    "gitpython>=3.1.0",
 ]
 
 [project.optional-dependencies]
