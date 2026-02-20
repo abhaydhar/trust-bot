@@ -294,63 +294,159 @@ The code has been chunked and indexed. Use the "Chunk Visualizer" tab to explore
                 Index a repository first using the **Code Indexer** tab.
                 """)
                 
-                with gr.Row():
-                    refresh_btn = gr.Button("Refresh Visualization", variant="primary")
+                # Hidden state to hold full data
+                all_nodes_state = gr.State([])
+                all_edges_state = gr.State([])
+                node_page_state = gr.State(1)
+                edge_page_state = gr.State(1)
                 
-                chunk_stats = gr.Markdown(label="Statistics")
+                with gr.Row():
+                    refresh_btn = gr.Button("Refresh Visualization", variant="primary", scale=2)
+                    page_size_dd = gr.Dropdown(
+                        choices=["25", "50", "100", "200"],
+                        value="50",
+                        label="Rows per page",
+                        interactive=True,
+                        scale=1,
+                    )
+                
+                chunk_stats = gr.Markdown(value="Click **Refresh** after indexing a repository.")
                 
                 with gr.Tabs():
                     with gr.Tab("Functions"):
+                        node_page_info = gr.Markdown(value="")
                         chunk_table = gr.Dataframe(
-                            headers=["Function", "File", "Language", "Type"],
-                            datatype=["str", "str", "str", "str"],
+                            headers=["#", "Function", "File", "Language", "Type"],
+                            datatype=["str", "str", "str", "str", "str"],
                             label="Indexed Functions",
                             interactive=False,
                             wrap=True,
                         )
+                        with gr.Row():
+                            node_prev_btn = gr.Button("Previous", size="sm")
+                            node_next_btn = gr.Button("Next", size="sm")
+                    
                     with gr.Tab("Call Relationships"):
+                        edge_page_info = gr.Markdown(value="")
                         edge_table = gr.Dataframe(
-                            headers=["Caller", "Callee", "Confidence"],
-                            datatype=["str", "str", "str"],
+                            headers=["#", "Caller", "Callee", "Confidence"],
+                            datatype=["str", "str", "str", "str"],
                             label="Call Graph Edges",
                             interactive=False,
                             wrap=True,
                         )
+                        with gr.Row():
+                            edge_prev_btn = gr.Button("Previous", size="sm")
+                            edge_next_btn = gr.Button("Next", size="sm")
                 
-                def render_chunk_viz():
+                def _paginate(rows, page, page_size):
+                    total = len(rows)
+                    total_pages = max(1, (total + page_size - 1) // page_size)
+                    page = max(1, min(page, total_pages))
+                    start = (page - 1) * page_size
+                    end = min(start + page_size, total)
+                    return rows[start:end], page, total_pages
+                
+                def _node_rows_from_data(nodes):
+                    rows = []
+                    for i, n in enumerate(nodes, 1):
+                        rows.append([
+                            str(i),
+                            str(n.get("name", "")),
+                            str(n.get("file", "")).replace("\\", "/"),
+                            str(n.get("language", "")),
+                            str(n.get("type", "function")),
+                        ])
+                    return rows
+                
+                def _edge_rows_from_data(edges):
+                    rows = []
+                    for i, e in enumerate(edges, 1):
+                        rows.append([
+                            str(i),
+                            _short_chunk_id(str(e.get("from", ""))),
+                            _short_chunk_id(str(e.get("to", ""))),
+                            str(e.get("confidence", "")),
+                        ])
+                    return rows
+                
+                def render_chunk_viz(page_size_str="50"):
                     try:
+                        page_size = int(page_size_str or "50")
                         data = _run_async(get_chunk_data())
                         nodes = data.get("nodes", [])
                         edges = data.get("edges", [])
                         
-                        stats = f"**Functions**: {len(nodes)} | **Call Relationships**: {len(edges)}"
+                        stats = f"**Total Functions**: {len(nodes)} | **Total Call Relationships**: {len(edges)}"
                         
-                        node_rows = []
-                        for n in nodes:
-                            name = str(n.get("name", ""))
-                            fpath = str(n.get("file", "")).replace("\\", "/")
-                            lang = str(n.get("language", ""))
-                            ntype = str(n.get("type", "function"))
-                            node_rows.append([name, fpath, lang, ntype])
+                        node_rows = _node_rows_from_data(nodes)
+                        edge_rows = _edge_rows_from_data(edges)
                         
-                        edge_rows = []
-                        for e in edges:
-                            caller = str(e.get("from", ""))
-                            callee = str(e.get("to", ""))
-                            conf = str(e.get("confidence", ""))
-                            # Shorten chunk IDs for readability: file::class::func -> func (file)
-                            caller_short = _short_chunk_id(caller)
-                            callee_short = _short_chunk_id(callee)
-                            edge_rows.append([caller_short, callee_short, conf])
+                        n_slice, n_pg, n_total = _paginate(node_rows, 1, page_size)
+                        e_slice, e_pg, e_total = _paginate(edge_rows, 1, page_size)
                         
-                        return stats, node_rows, edge_rows
+                        n_info = f"Page **{n_pg}** of **{n_total}** ({len(nodes)} functions)"
+                        e_info = f"Page **{e_pg}** of **{e_total}** ({len(edges)} edges)"
+                        
+                        return (
+                            nodes, edges,       # states
+                            1, 1,               # page resets
+                            stats,
+                            n_info, n_slice,
+                            e_info, e_slice,
+                        )
                     except Exception as e:
                         logger.exception("Chunk visualization failed")
-                        return f"Error: {e}", [], []
+                        return [], [], 1, 1, f"Error: {e}", "", [], "", []
                 
                 refresh_btn.click(
                     fn=render_chunk_viz,
-                    outputs=[chunk_stats, chunk_table, edge_table]
+                    inputs=[page_size_dd],
+                    outputs=[
+                        all_nodes_state, all_edges_state,
+                        node_page_state, edge_page_state,
+                        chunk_stats,
+                        node_page_info, chunk_table,
+                        edge_page_info, edge_table,
+                    ],
+                )
+                
+                def go_node_page(nodes, current_page, delta, page_size_str):
+                    page_size = int(page_size_str)
+                    new_page = current_page + delta
+                    node_rows = _node_rows_from_data(nodes)
+                    sliced, pg, total_pages = _paginate(node_rows, new_page, page_size)
+                    info = f"Page **{pg}** of **{total_pages}** ({len(nodes)} functions)"
+                    return pg, info, sliced
+                
+                node_prev_btn.click(
+                    fn=lambda n, p, ps: go_node_page(n, p, -1, ps),
+                    inputs=[all_nodes_state, node_page_state, page_size_dd],
+                    outputs=[node_page_state, node_page_info, chunk_table],
+                )
+                node_next_btn.click(
+                    fn=lambda n, p, ps: go_node_page(n, p, 1, ps),
+                    inputs=[all_nodes_state, node_page_state, page_size_dd],
+                    outputs=[node_page_state, node_page_info, chunk_table],
+                )
+                
+                def go_edge_page(edges, current_page, delta, page_size_str):
+                    page_size = int(page_size_str)
+                    new_page = current_page + delta
+                    edge_rows = _edge_rows_from_data(edges)
+                    sliced, pg, total_pages = _paginate(edge_rows, new_page, page_size)
+                    info = f"Page **{pg}** of **{total_pages}** ({len(edges)} edges)"
+                    return pg, info, sliced
+                
+                edge_prev_btn.click(
+                    fn=lambda e, p, ps: go_edge_page(e, p, -1, ps),
+                    inputs=[all_edges_state, edge_page_state, page_size_dd],
+                    outputs=[edge_page_state, edge_page_info, edge_table],
+                )
+                edge_next_btn.click(
+                    fn=lambda e, p, ps: go_edge_page(e, p, 1, ps),
+                    inputs=[all_edges_state, edge_page_state, page_size_dd],
+                    outputs=[edge_page_state, edge_page_info, edge_table],
                 )
 
             # Tab 4: Agentic (Dual-Derivation)
