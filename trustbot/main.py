@@ -76,27 +76,46 @@ def main() -> None:
     logger.info("Codebase root: %s", settings.codebase_root.resolve())
     logger.info("LLM model: %s", settings.litellm_model)
 
-    # Initialize tools and code index
-    registry, code_index = asyncio.run(initialize_app())
+    # Use a single event loop for the entire application lifecycle
+    # to avoid Windows ProactorEventLoop issues with Neo4j async driver
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     try:
-        # Create and launch the Gradio UI
+        # Initialize tools and code index
+        registry, code_index = loop.run_until_complete(initialize_app())
+
+        # Create the Gradio UI
         app = create_ui(registry, code_index)
         port = settings.server_port
         logger.info("UI built. Launching on http://localhost:%d ...", port)
+
+        # Launch Gradio without blocking, then run the event loop manually
+        # This prevents Windows ProactorEventLoop issues with Neo4j
         app.launch(
             server_name="127.0.0.1",
             server_port=port,
             share=False,
+            prevent_thread_lock=True,
+            inbrowser=False,
         )
-    finally:
-        # Graceful shutdown: close Neo4j and other connections before exit.
-        # Reduces AttributeError during asyncio teardown on Windows.
+
+        # Keep the event loop running to service Neo4j and other async operations
+        logger.info("Server running. Press Ctrl+C to stop.")
         try:
-            asyncio.run(registry.shutdown_all())
+            while True:
+                loop.run_until_complete(asyncio.sleep(1))
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received.")
+    finally:
+        # Graceful shutdown
+        try:
+            loop.run_until_complete(registry.shutdown_all())
             logger.info("Tools shut down cleanly.")
         except Exception as e:
             logger.warning("Shutdown warning: %s", e)
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":

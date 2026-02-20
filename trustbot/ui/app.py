@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -28,6 +29,14 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
             )
         except KeyError:
             logger.warning("Multi-agent pipeline not available (missing tools)")
+
+    # Capture the main event loop for thread-safe async operations
+    main_loop = asyncio.get_event_loop()
+
+    def _run_async(coro):
+        """Run coroutine in the main event loop from any thread."""
+        future = asyncio.run_coroutine_threadsafe(coro, main_loop)
+        return future.result()
 
     async def validate_project(project_id_str: str, run_id_str: str):
         if not project_id_str.strip() or not run_id_str.strip():
@@ -117,7 +126,7 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                     json_output = gr.Code(label="Report JSON", language="json")
 
                 validate_btn.click(
-                    fn=validate_project,
+                    fn=lambda p, r: _run_async(validate_project(p, r)),
                     inputs=[project_id_input, run_id_input],
                     outputs=[summary_output, report_output, json_output],
                 )
@@ -137,7 +146,7 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                 agentic_summary = gr.Markdown(label="Summary")
                 agentic_report = gr.Markdown(label="Report")
                 agentic_btn.click(
-                    fn=validate_agentic,
+                    fn=lambda f: _run_async(validate_agentic(f)),
                     inputs=[flow_key_input],
                     outputs=[agentic_summary, agentic_report],
                 )
@@ -148,7 +157,7 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                 chat_btn = gr.Button("Send", variant="primary")
                 chat_output = gr.Markdown(label="Response")
 
-                chat_btn.click(fn=handle_chat, inputs=chat_input, outputs=chat_output)
+                chat_btn.click(fn=lambda m: _run_async(handle_chat(m)), inputs=chat_input, outputs=chat_output)
 
             with gr.Tab("Index"):
                 gr.Markdown("### Codebase Index Management")
@@ -158,9 +167,9 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                     status_btn = gr.Button("Check Status")
                 index_output = gr.Textbox(label="Result", lines=6, interactive=False)
 
-                index_btn.click(fn=lambda: run_reindex(False), outputs=index_output)
-                force_index_btn.click(fn=lambda: run_reindex(True), outputs=index_output)
-                status_btn.click(fn=get_status, outputs=index_output)
+                index_btn.click(fn=lambda: _run_async(run_reindex(False)), outputs=index_output)
+                force_index_btn.click(fn=lambda: _run_async(run_reindex(True)), outputs=index_output)
+                status_btn.click(fn=lambda: _run_async(get_status()), outputs=index_output)
 
     return app
 
