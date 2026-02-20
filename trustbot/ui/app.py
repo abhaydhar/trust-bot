@@ -8,14 +8,26 @@ import logging
 import gradio as gr
 
 from trustbot.agent.orchestrator import AgentOrchestrator
+from trustbot.agents.pipeline import ValidationPipeline
+from trustbot.index.code_index import CodeIndex
 from trustbot.models.validation import EdgeVerdict, NodeVerdict, ProjectValidationReport
 from trustbot.tools.base import ToolRegistry
 
 logger = logging.getLogger("trustbot.ui")
 
 
-def create_ui(registry: ToolRegistry) -> gr.Blocks:
+def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr.Blocks:
     orchestrator = AgentOrchestrator(registry)
+    pipeline = None
+    if code_index:
+        try:
+            pipeline = ValidationPipeline(
+                neo4j_tool=registry.get("neo4j"),
+                filesystem_tool=registry.get("filesystem"),
+                code_index=code_index,
+            )
+        except KeyError:
+            logger.warning("Multi-agent pipeline not available (missing tools)")
 
     async def validate_project(project_id_str: str, run_id_str: str):
         if not project_id_str.strip() or not run_id_str.strip():
@@ -67,6 +79,23 @@ def create_ui(registry: ToolRegistry) -> gr.Blocks:
         except Exception as e:
             return f"Error: {e}"
 
+    async def validate_agentic(flow_key: str):
+        """Run multi-agent dual-derivation validation."""
+        if not flow_key.strip():
+            return "Please enter an Execution Flow key.", ""
+        if not pipeline:
+            return "Multi-agent pipeline not available.", ""
+        try:
+            result, report_md = await pipeline.validate(flow_key.strip())
+            summary = f"**Trust Score**: {result.flow_trust_score:.0%}\n\n"
+            summary += f"Confirmed: {len(result.confirmed_edges)} | "
+            summary += f"Phantom: {len(result.phantom_edges)} | "
+            summary += f"Missing: {len(result.missing_edges)}"
+            return summary, report_md
+        except Exception as e:
+            logger.exception("Agentic validation failed")
+            return f"Error: {e}", ""
+
     app = gr.Blocks(title="TrustBot")
 
     with app:
@@ -91,6 +120,26 @@ def create_ui(registry: ToolRegistry) -> gr.Blocks:
                     fn=validate_project,
                     inputs=[project_id_input, run_id_input],
                     outputs=[summary_output, report_output, json_output],
+                )
+
+            with gr.Tab("Agentic (Dual-Derivation)"):
+                gr.Markdown(
+                    "**Multi-agent validation**: Agent 1 fetches from Neo4j, Agent 2 builds from "
+                    "filesystem independently. Verification Agent diffs and scores."
+                )
+                with gr.Row():
+                    flow_key_input = gr.Textbox(
+                        label="Execution Flow Key",
+                        placeholder="e.g. EF-001 or flow key from Neo4j",
+                        scale=3,
+                    )
+                    agentic_btn = gr.Button("Run Dual-Derivation", variant="primary", scale=1)
+                agentic_summary = gr.Markdown(label="Summary")
+                agentic_report = gr.Markdown(label="Report")
+                agentic_btn.click(
+                    fn=validate_agentic,
+                    inputs=[flow_key_input],
+                    outputs=[agentic_summary, agentic_report],
                 )
 
             with gr.Tab("Chat"):

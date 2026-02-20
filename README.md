@@ -6,6 +6,7 @@ LLM-powered agent that validates Neo4j call graphs against actual codebases.
 
 ## Architecture
 
+### Legacy Single-Agent
 ```
 Neo4j Call Graph  ──→  Agent (LLM via LiteLLM)  ←──  Actual Codebase
                               │
@@ -16,6 +17,17 @@ Neo4j Call Graph  ──→  Agent (LLM via LiteLLM)  ←──  Actual Codebase
                    │           │          │
               Neo4j DB    Local Files  ChromaDB
 ```
+
+### Multi-Agent (Dual-Derivation)
+```
+Agent 1 (Neo4j)  ──→  Call Graph A  ──┐
+                                       ├──→  Verification Agent  ──→  Trust Report
+Agent 2 (Filesystem)  ──→  Call Graph B  ──┘
+```
+
+- **Agent 1**: Fetches call graph from Neo4j only (no filesystem access)
+- **Agent 2**: Builds call graph from filesystem only (no Neo4j access)
+- **Verification Agent**: Diffs both graphs, classifies edges (confirmed/phantom/missing), computes trust scores
 
 ## Quick Start
 
@@ -59,6 +71,14 @@ pip install -e ".[dev]"
 pytest
 ```
 
+### Browser E2E Test (optional)
+
+```bash
+pip install playwright
+playwright install chromium
+python scripts/run_browser_test.py
+```
+
 ## Project Structure
 
 ```
@@ -67,16 +87,27 @@ trustbot/
 ├── config.py             # Settings via pydantic-settings
 ├── models/
 │   ├── graph.py          # ExecutionFlow, Snippet, CallGraph
-│   └── validation.py     # ValidationReport, NodeStatus, EdgeStatus
+│   ├── validation.py     # ValidationReport, NodeStatus, EdgeStatus
+│   └── agentic.py        # CallGraphOutput, SpecFlowDocument, trust scores
+├── agents/               # Multi-agent validation pipeline
+│   ├── agent1_neo4j.py   # Neo4j-only graph fetcher
+│   ├── agent2_filesystem.py # Filesystem-only graph builder (tiered extraction)
+│   ├── normalization.py  # Canonical edge normalization
+│   ├── verification.py   # Diff + trust scoring
+│   ├── report.py         # Markdown report generation
+│   └── pipeline.py       # Full validation pipeline
+├── index/
+│   └── code_index.py     # SQLite function name → file path index
 ├── tools/
-│   ├── base.py           # BaseTool, ToolRegistry (access control, audit logging)
-│   ├── neo4j_tool.py     # Neo4j queries (execution flows, call graphs)
+│   ├── base.py           # BaseTool, ToolRegistry
+│   ├── neo4j_tool.py     # Neo4j queries
 │   ├── filesystem_tool.py # File reading, search, function extraction
-│   └── index_tool.py     # Semantic search over indexed codebase
+│   ├── index_tool.py     # Semantic search (ChromaDB)
+│   └── browser_tool.py   # Playwright browser control (E2E tests)
 ├── indexing/
 │   ├── chunker.py        # Regex-based function-level code chunking
 │   ├── embedder.py       # Embedding generation via LiteLLM
-│   └── pipeline.py       # Full indexing pipeline (chunk → embed → store)
+│   └── pipeline.py       # Full indexing pipeline
 ├── agent/
 │   ├── orchestrator.py   # LLM agent with tool-calling
 │   └── prompts.py        # System prompts and templates
@@ -118,6 +149,7 @@ Key settings in `.env`:
 | `CODEBASE_ROOT` | Path to the codebase to validate | `./sample_codebase` |
 | `MAX_CONCURRENT_LLM_CALLS` | Parallel LLM call limit | `5` |
 | `SERVER_PORT` | Web UI port | `7860` |
+| `ENABLE_BROWSER_TOOL` | Enable Playwright browser tool for E2E tests | `false` |
 
 ### Troubleshooting
 

@@ -1,7 +1,8 @@
 """
 TrustBot application entry point.
 
-Initializes all tools, runs the indexing pipeline, and launches the UI.
+Initializes all tools, code index, runs the indexing pipeline, and launches the UI.
+Supports both legacy single-agent and new multi-agent validation pipelines.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ load_dotenv()
 import gradio as gr
 
 from trustbot.config import settings
+from trustbot.index.code_index import CodeIndex
 from trustbot.tools.base import ToolRegistry
 from trustbot.tools.filesystem_tool import FilesystemTool
 from trustbot.tools.index_tool import IndexTool
@@ -30,8 +32,8 @@ logging.basicConfig(
 logger = logging.getLogger("trustbot")
 
 
-async def initialize_app() -> ToolRegistry:
-    """Initialize all tools and return the registry."""
+async def initialize_app() -> tuple[ToolRegistry, CodeIndex]:
+    """Initialize all tools, code index, and return the registry."""
     registry = ToolRegistry()
 
     # Register tools
@@ -43,25 +45,43 @@ async def initialize_app() -> ToolRegistry:
     registry.register(fs_tool)
     registry.register(index_tool)
 
-    # Initialize all tools (connects to Neo4j, sets up filesystem root, loads index)
+    # Optional: Browser tool for E2E testing (disabled by default to avoid launching browser)
+    if settings.enable_browser_tool:
+        try:
+            from trustbot.tools.browser_tool import BrowserTool
+            browser_tool = BrowserTool()
+            registry.register(browser_tool)
+            logger.info("Browser tool registered (Playwright available)")
+        except ImportError:
+            logger.debug("Browser tool skipped (Playwright not installed)")
+
+    # Initialize all tools
     await registry.initialize_all()
     logger.info("All tools initialized successfully.")
 
-    return registry
+    # Build Code Index for multi-agent pipeline
+    code_index = CodeIndex()
+    try:
+        stats = code_index.build()
+        logger.info("Code index built: %d functions from %d files", stats["functions"], stats["files"])
+    except Exception as e:
+        logger.warning("Code index build failed (multi-agent validation may be limited): %s", e)
+
+    return registry, code_index
 
 
 def main() -> None:
     """Main entry point — start TrustBot."""
-    logger.info("Starting TrustBot v0.1.0")
+    logger.info("Starting TrustBot v0.2.0 (agentic)")
     logger.info("Codebase root: %s", settings.codebase_root.resolve())
     logger.info("LLM model: %s", settings.litellm_model)
 
-    # Initialize tools
-    registry = asyncio.run(initialize_app())
+    # Initialize tools and code index
+    registry, code_index = asyncio.run(initialize_app())
 
     try:
         # Create and launch the Gradio UI
-        app = create_ui(registry)
+        app = create_ui(registry, code_index)
         port = settings.server_port
         logger.info("UI built. Launching on http://localhost:%d ...", port)
         app.launch(

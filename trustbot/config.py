@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     function_context_buffer_lines: int = 10
     max_function_lines_for_llm: int = 500
 
+    # Multi-agent / job queue
+    redis_url: str = "redis://localhost:6379/0"
+    enable_celery: bool = False
+    enable_browser_tool: bool = False
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
     def get_litellm_kwargs(self) -> dict:
