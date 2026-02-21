@@ -1,8 +1,8 @@
 """
 TrustBot application entry point.
 
-Initializes all tools, code index, runs the indexing pipeline, and launches the UI.
-Supports both legacy single-agent and new multi-agent validation pipelines.
+Initializes all tools and launches the UI.
+Code indexing is now done via the Git Indexer tab in the UI.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ load_dotenv()
 import gradio as gr
 
 from trustbot.config import settings
-from trustbot.index.code_index import CodeIndex
 from trustbot.tools.base import ToolRegistry
 from trustbot.tools.filesystem_tool import FilesystemTool
 from trustbot.tools.neo4j_tool import Neo4jTool
@@ -31,8 +30,8 @@ logging.basicConfig(
 logger = logging.getLogger("trustbot")
 
 
-async def initialize_app() -> tuple[ToolRegistry, CodeIndex]:
-    """Initialize all tools, code index, and return the registry."""
+async def initialize_app() -> ToolRegistry:
+    """Initialize all tools and return the registry."""
     registry = ToolRegistry()
 
     # Register tools
@@ -65,15 +64,7 @@ async def initialize_app() -> tuple[ToolRegistry, CodeIndex]:
     await registry.initialize_all()
     logger.info("All tools initialized successfully.")
 
-    # Build Code Index for multi-agent pipeline
-    code_index = CodeIndex()
-    try:
-        stats = code_index.build()
-        logger.info("Code index built: %d functions from %d files", stats["functions"], stats["files"])
-    except Exception as e:
-        logger.warning("Code index build failed (multi-agent validation may be limited): %s", e)
-
-    return registry, code_index
+    return registry
 
 
 def main() -> None:
@@ -88,11 +79,11 @@ def main() -> None:
     asyncio.set_event_loop(loop)
 
     try:
-        # Initialize tools and code index
-        registry, code_index = loop.run_until_complete(initialize_app())
+        # Initialize tools
+        registry = loop.run_until_complete(initialize_app())
 
-        # Create the Gradio UI
-        app = create_ui(registry, code_index)
+        # Create the Gradio UI (code index will be created via Git Indexer tab)
+        app = create_ui(registry)
         port = settings.server_port
         logger.info("UI built. Launching on http://localhost:%d ...", port)
 
