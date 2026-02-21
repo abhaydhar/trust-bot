@@ -66,10 +66,17 @@ class Agent2IndexBuilder:
         self,
         root_function: str,
         execution_flow_id: str = "",
+        root_class: str = "",
+        root_file: str = "",
     ) -> CallGraphOutput:
         """
         Build a call graph starting from root_function by traversing
         the indexed call edges.
+
+        Fallback chain when root_function is not in the index:
+        1. Try root_function as-is (e.g. "InitialiseEcran")
+        2. Try root_class (e.g. "TForm1" — for .dfm form roots)
+        3. Try root_function's first callee from Neo4j edges (skip non-code roots)
         """
         edges: list[CallGraphEdge] = []
         unresolved: list[str] = []
@@ -77,8 +84,6 @@ class Agent2IndexBuilder:
 
         all_edges = self._index.get_edges()
 
-        # Build edge map keyed by BARE function name (uppercase).
-        # Each entry stores parsed caller/callee info including class and file.
         edge_map: dict[str, list[dict]] = {}
         for e in all_edges:
             raw_caller = e.get("from") or e.get("caller", "")
@@ -110,9 +115,45 @@ class Agent2IndexBuilder:
             func_to_file[key] = fp
             func_to_class[key] = cn or ""
 
+        # Resolve the effective root: try original name, then class fallback
+        original_root = root_function
         root_key = root_function.upper().strip()
         root_in_index = root_key in func_to_file
         root_in_edge_map = root_key in edge_map
+        resolved_via = "original"
+
+        if not root_in_index and not root_in_edge_map and root_class:
+            class_key = root_class.upper().strip()
+            # Fallback 1: try the class name directly (e.g. TForm1 as a chunk)
+            if class_key in func_to_file or class_key in edge_map:
+                logger.info(
+                    "Root '%s' not found, falling back to class '%s'",
+                    root_function, root_class,
+                )
+                root_function = root_class
+                root_key = class_key
+                root_in_index = root_key in func_to_file
+                root_in_edge_map = root_key in edge_map
+                resolved_via = f"class_fallback ({root_class})"
+            else:
+                # Fallback 2: find all functions belonging to this class and
+                # traverse from each of them. For .dfm form roots like Form1/TForm1,
+                # this picks up Button2Click, FormCreate, etc. in the class.
+                class_members = [
+                    fn_key for fn_key, cls in func_to_class.items()
+                    if cls.upper().strip() == class_key
+                ]
+                if class_members:
+                    logger.info(
+                        "Root '%s' and class '%s' not found as functions. "
+                        "Traversing from %d class members: %s",
+                        original_root, root_class, len(class_members),
+                        class_members[:5],
+                    )
+                    resolved_via = f"class_members ({root_class} -> {len(class_members)} functions)"
+                    root_in_index = True
+                    root_in_edge_map = True
+
         root_outgoing = len(edge_map.get(root_key, []))
 
         if not root_in_index:
@@ -130,6 +171,7 @@ class Agent2IndexBuilder:
                 list(edge_map.keys())[:10],
             )
 
+        # Primary traversal from the resolved root
         self._traverse(
             root_function,
             edge_map,
@@ -141,7 +183,31 @@ class Agent2IndexBuilder:
             depth=1,
         )
 
-        # Diagnostic metadata for debugging matching issues
+        # If primary traversal found nothing and we have class members, traverse
+        # from each member function (handles .dfm form → class member resolution)
+        if not edges and root_class and "class_members" in resolved_via:
+            class_key = root_class.upper().strip()
+            class_members = [
+                fn_key for fn_key, cls in func_to_class.items()
+                if cls.upper().strip() == class_key
+            ]
+            for member_key in class_members:
+                # Use the original-case function name from the index
+                member_name = next(
+                    (fn for fn, _, _ in all_functions if fn.upper().strip() == member_key),
+                    member_key,
+                )
+                self._traverse(
+                    member_name,
+                    edge_map,
+                    func_to_file,
+                    func_to_class,
+                    edges,
+                    unresolved,
+                    visited,
+                    depth=1,
+                )
+
         sample_index_funcs = sorted(func_to_file.keys())[:15]
         sample_edge_callers = sorted(edge_map.keys())[:15]
 
@@ -158,6 +224,11 @@ class Agent2IndexBuilder:
                 ),
                 "index_functions": len(all_functions),
                 "index_edges": len(all_edges),
+                "original_root": original_root,
+                "resolved_root": root_function,
+                "resolved_via": resolved_via,
+                "root_class_hint": root_class,
+                "root_file_hint": root_file,
                 "root_found_in_index": root_in_index,
                 "root_has_outgoing_edges": root_in_edge_map,
                 "root_outgoing_count": root_outgoing,

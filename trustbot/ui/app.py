@@ -26,14 +26,24 @@ logger = logging.getLogger("trustbot.ui")
 
 def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr.Blocks:
     orchestrator = AgentOrchestrator(registry)
-    git_index = None  # Track git-cloned repository index
+    git_index = None
 
-    # Initialise the pipeline with Neo4j tool; code_index will be set after indexing
+    # Auto-load existing git index if the DB file exists from a previous session
+    git_index_path = settings.codebase_root / ".trustbot_git_index.db"
+    if git_index_path.exists():
+        try:
+            git_index = CodeIndex(db_path=git_index_path)
+            logger.info("Auto-loaded existing git index from %s", git_index_path)
+        except Exception as e:
+            logger.warning("Could not auto-load git index: %s", e)
+
+    active_index = git_index or code_index
+
     pipeline: ValidationPipeline | None = None
     try:
         pipeline = ValidationPipeline(
             neo4j_tool=registry.get("neo4j"),
-            code_index=code_index,
+            code_index=active_index,
         )
     except KeyError:
         logger.warning("ValidationPipeline not available (missing neo4j tool)")
@@ -100,23 +110,84 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
             logger.exception("Git indexing failed")
             return f"Error: {e}"
 
+    async def index_local_folder(folder_path: str, progress=gr.Progress()):
+        """Index code directly from a local folder (no git clone)."""
+        nonlocal git_index
+
+        folder_path = (folder_path or "").strip()
+        if not folder_path:
+            return "Please enter a folder path."
+
+        folder = Path(folder_path)
+        if not folder.exists():
+            return f"Folder does not exist: `{folder}`"
+        if not folder.is_dir():
+            return f"Path is not a directory: `{folder}`"
+
+        try:
+            progress(0.05, desc="Scanning local folder...")
+
+            from trustbot.indexing.chunker import chunk_codebase
+            from trustbot.indexing.call_graph_builder import build_call_graph_from_chunks
+
+            chunks = await asyncio.to_thread(chunk_codebase, folder)
+
+            progress(0.35, desc=f"Found {len(chunks)} code chunks, building index...")
+
+            git_index_path = settings.codebase_root / ".trustbot_git_index.db"
+            code_idx = CodeIndex(db_path=git_index_path)
+            code_idx.build(codebase_root=folder)
+
+            function_count = len([c for c in chunks if c.function_name])
+            progress(0.55, desc=f"Building call graph from {function_count} functions...")
+
+            edges = await asyncio.to_thread(build_call_graph_from_chunks, chunks)
+
+            edge_tuples = [(e.from_chunk, e.to_chunk, e.confidence) for e in edges]
+            code_idx.store_edges(edge_tuples)
+            code_idx.close()
+
+            progress(0.9, desc="Finalizing...")
+
+            git_index = CodeIndex(db_path=git_index_path)
+            if pipeline:
+                pipeline.set_code_index(git_index)
+
+            files_count = len(set(c.file_path for c in chunks))
+            progress(1.0, desc="Done!")
+
+            return (
+                f"## Indexing Complete!\n\n"
+                f"**Source**: Local Folder\n"
+                f"**Path**: `{folder}`\n"
+                f"**Files processed**: {files_count}\n"
+                f"**Code chunks created**: {len(chunks)}\n"
+                f"**Functions indexed**: {function_count}\n"
+                f"**Call graph edges**: {len(edges)}\n\n"
+                f"Codebase is ready. Switch to the **Validate** tab to start validation."
+            )
+        except Exception as e:
+            logger.exception("Local folder indexing failed")
+            return f"Error: {e}"
+
     async def validate_all_flows(project_id_str: str, run_id_str: str):
         """3-agent validation across all flows in a project."""
+        _empty = ("", "", "", "", "")
         if not project_id_str.strip() or not run_id_str.strip():
-            return "Please enter both Project ID and Run ID.", "", ""
+            return ("Please enter both Project ID and Run ID.",) + _empty
         try:
             project_id = int(project_id_str.strip())
             run_id = int(run_id_str.strip())
         except ValueError:
-            return "Project ID and Run ID must be integers.", "", ""
+            return ("Project ID and Run ID must be integers.",) + _empty
 
         if not pipeline:
-            return "Pipeline not available. Neo4j tool is missing.", "", ""
+            return ("Pipeline not available. Neo4j tool is missing.",) + _empty
         if not pipeline.has_index:
             return (
                 "**No codebase indexed.** Please go to the **Code Indexer** tab first, "
-                "clone the repository, and then return here to validate.", "", ""
-            )
+                "clone the repository, and then return here to validate.",
+            ) + _empty
 
         try:
             _set_progress(0.02, "Connecting to Neo4j...")
@@ -162,6 +233,7 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
 
             summary_md = _format_3agent_summary(project_id, run_id, all_results)
             report_md = _format_3agent_report(project_id, run_id, all_results)
+            calltree = _build_mermaid_panel(all_results)
             agent1_md = _format_agent_output("Agent 1 (Neo4j)", all_results, "neo4j_graph")
             agent2_md = _format_agent_output("Agent 2 (Index)", all_results, "index_graph")
             raw_json = json.dumps(
@@ -170,15 +242,15 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
             )
 
             _set_progress(1.0, "Validation complete!", done=True)
-            return summary_md, report_md, agent1_md, agent2_md, raw_json
+            return summary_md, report_md, calltree, agent1_md, agent2_md, raw_json
 
         except ValueError as e:
             _set_progress(1.0, f"Error: {e}", done=True)
-            return f"Error: {e}", "", "", "", ""
+            return f"Error: {e}", "", "", "", "", ""
         except Exception as e:
             logger.exception("Validation failed")
             _set_progress(1.0, f"Error: {e}", done=True)
-            return f"Unexpected error: {e}", "", "", "", ""
+            return f"Unexpected error: {e}", "", "", "", "", ""
 
     async def handle_chat(message: str):
         if not message.strip():
@@ -240,12 +312,20 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
             with gr.Tab("1. Code Indexer"):
                 gr.Markdown(
                     "### Step 1: Index Your Codebase\n"
-                    "Clone a git repository to build a local code index. "
-                    "This index is used by **Agent 2** during validation to independently "
-                    "reconstruct the call graph from source code.\n\n"
+                    "Clone a git repository **or** select a local folder to build a "
+                    "code index. This index is used by **Agent 2** during validation "
+                    "to independently reconstruct the call graph from source code.\n\n"
                     "After indexing, switch to the **Validate** tab."
                 )
-                with gr.Row():
+
+                source_radio = gr.Radio(
+                    choices=["Git Repository", "Local Folder"],
+                    value="Git Repository",
+                    label="Source",
+                )
+
+                git_row = gr.Row(visible=True)
+                with git_row:
                     git_url_input = gr.Textbox(
                         label="Git Repository URL",
                         placeholder="https://github.com/username/repo.git",
@@ -254,12 +334,36 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                     branch_input = gr.Textbox(
                         label="Branch", placeholder="main", value="main", scale=1,
                     )
-                index_repo_btn = gr.Button("Clone and Index Repository", variant="primary")
+
+                local_row = gr.Row(visible=False)
+                with local_row:
+                    folder_path_input = gr.File(
+                        label="Folder Path",
+                        file_count="directory",
+                        type="filepath",
+                        interactive=True,
+                        # default_path not supported in Gradio 6
+                    )
+
+                def _toggle_source(source):
+                    is_local = source == "Local Folder"
+                    return gr.update(visible=not is_local), gr.update(visible=is_local)
+
+                source_radio.change(
+                    fn=_toggle_source,
+                    inputs=[source_radio],
+                    outputs=[git_row, local_row],
+                )
+
+                index_repo_btn = gr.Button("Index Codebase", variant="primary")
                 index_status = gr.Markdown(label="Status")
 
-                def _do_clone_index(u, b):
+                def _do_index(source, git_url, branch, folder_path):
                     try:
-                        result = _run_async(clone_and_index_repo(u, b))
+                        if source == "Local Folder":
+                            result = _run_async(index_local_folder(folder_path))
+                        else:
+                            result = _run_async(clone_and_index_repo(git_url, branch))
                     except Exception as e:
                         result = f"Error: {e}"
                     return gr.update(interactive=True), result
@@ -268,8 +372,8 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                     fn=lambda: gr.update(interactive=False),
                     outputs=[index_repo_btn],
                 ).then(
-                    fn=_do_clone_index,
-                    inputs=[git_url_input, branch_input],
+                    fn=_do_index,
+                    inputs=[source_radio, git_url_input, branch_input, folder_path_input],
                     outputs=[index_repo_btn, index_status],
                 )
 
@@ -294,6 +398,9 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
 
                 with gr.Accordion("Detailed Report", open=False):
                     report_output = gr.Markdown(label="Structured Report")
+
+                with gr.Accordion("Call Tree Diagrams", open=False):
+                    calltree_html = gr.HTML(label="Mermaid Call Trees")
 
                 with gr.Accordion("Agent 1 Output (Neo4j Call Graph)", open=False):
                     agent1_output = gr.Markdown(label="Agent 1 — Neo4j edges")
@@ -340,7 +447,7 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                         yield (
                             gr.update(interactive=False),
                             bar,
-                            gr.update(), gr.update(),
+                            gr.update(), gr.update(), gr.update(),
                             gr.update(), gr.update(), gr.update(),
                         )
                         time.sleep(0.3)
@@ -348,13 +455,14 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                     try:
                         result = future.result()
                     except Exception as e:
-                        result = (f"Error: {e}", "", "", "", "")
+                        result = (f"Error: {e}", "", "", "", "", "")
 
                     done_bar = _build_progress_bar(1.0, "Validation complete!")
                     yield (
                         gr.update(interactive=True),
                         done_bar,
-                        result[0], result[1], result[2], result[3], result[4],
+                        result[0], result[1], result[2],
+                        result[3], result[4], result[5],
                     )
                     pool.shutdown(wait=False)
 
@@ -363,7 +471,7 @@ def create_ui(registry: ToolRegistry, code_index: CodeIndex | None = None) -> gr
                     inputs=[project_id_input, run_id_input],
                     outputs=[
                         validate_btn, progress_html,
-                        summary_output, report_output,
+                        summary_output, report_output, calltree_html,
                         agent1_output, agent2_output,
                         json_output,
                     ],
@@ -608,6 +716,7 @@ def _format_3agent_report(
 ) -> str:
     """Detailed markdown report with Agent 1, Agent 2, and Agent 3 output per flow."""
     from trustbot.models.agentic import CallGraphOutput, normalize_file_path
+    from trustbot.ui.call_tree import build_text_tree
 
     lines = [
         f"# 3-Agent Validation Report",
@@ -646,7 +755,17 @@ def _format_3agent_report(
                 f"**Edges**: {len(neo4j_graph.edges)}"
             )
             lines.append("")
+            # Call tree visualization
             if neo4j_graph.edges:
+                tree = build_text_tree(neo4j_graph, "Neo4j")
+                lines.append("**Call Tree:**")
+                lines.append("")
+                lines.append("```")
+                lines.append(tree)
+                lines.append("```")
+                lines.append("")
+                lines.append("**Edge Details:**")
+                lines.append("")
                 lines.append("| # | Caller | Class | File | Callee | Class | File |")
                 lines.append("|---|--------|-------|------|--------|-------|------|")
                 for i, e in enumerate(neo4j_graph.edges[:40], 1):
@@ -674,6 +793,11 @@ def _format_3agent_report(
                 f"**Edges**: {len(index_graph.edges)}"
             )
             idx_meta = index_graph.metadata
+            if idx_meta.get("resolved_via") and idx_meta["resolved_via"] != "original":
+                lines.append(
+                    f"**Resolved via**: {idx_meta['resolved_via']} "
+                    f"(original root: `{idx_meta.get('original_root', '')}`)"
+                )
             if idx_meta.get("root_found_in_index") is not None:
                 lines.append(
                     f"**Root in index**: {idx_meta.get('root_found_in_index')} | "
@@ -682,7 +806,17 @@ def _format_3agent_report(
                     f"**Index edges**: {idx_meta.get('index_edges', '-')}"
                 )
             lines.append("")
+            # Call tree visualization
             if index_graph.edges:
+                tree = build_text_tree(index_graph, "Index")
+                lines.append("**Call Tree:**")
+                lines.append("")
+                lines.append("```")
+                lines.append(tree)
+                lines.append("```")
+                lines.append("")
+                lines.append("**Edge Details:**")
+                lines.append("")
                 lines.append("| # | Caller | Class | File | Callee | Class | File | Conf |")
                 lines.append("|---|--------|-------|------|--------|-------|------|------|")
                 for i, e in enumerate(index_graph.edges[:40], 1):
@@ -762,6 +896,97 @@ def _format_3agent_report(
             lines.append("")
 
     return "\n".join(lines)
+
+
+def _build_mermaid_panel(results: list[dict]) -> str:
+    """
+    Build Mermaid call tree diagrams rendered inside a self-contained iframe.
+    Gradio sandboxes gr.HTML and blocks external scripts, so we use an iframe
+    with srcdoc containing a complete HTML page + Mermaid CDN.
+    """
+    from trustbot.models.agentic import CallGraphOutput
+    from trustbot.ui.call_tree import build_mermaid
+
+    flow_sections = []
+    for idx, r in enumerate(results):
+        neo4j_graph: CallGraphOutput | None = r.get("neo4j_graph")
+        index_graph: CallGraphOutput | None = r.get("index_graph")
+        flow_name = r["flow_name"]
+        trust = r["result"].flow_trust_score
+
+        neo_mermaid = build_mermaid(neo4j_graph) if neo4j_graph and neo4j_graph.edges else ""
+        idx_mermaid = build_mermaid(index_graph) if index_graph and index_graph.edges else ""
+
+        if not neo_mermaid and not idx_mermaid:
+            continue
+
+        panels_html = ""
+        if neo_mermaid:
+            panels_html += f"""
+            <div style="flex:1;min-width:320px;background:#fff;padding:16px;
+                        border-radius:8px;border:2px solid #FF9800;">
+                <h4 style="margin:0 0 12px;color:#FF9800;">
+                    Agent 1 &mdash; Neo4j ({len(neo4j_graph.edges)} edges)</h4>
+                <pre class="mermaid">{neo_mermaid}</pre>
+            </div>"""
+        if idx_mermaid:
+            panels_html += f"""
+            <div style="flex:1;min-width:320px;background:#fff;padding:16px;
+                        border-radius:8px;border:2px solid #9C27B0;">
+                <h4 style="margin:0 0 12px;color:#9C27B0;">
+                    Agent 2 &mdash; Index ({len(index_graph.edges)} edges)</h4>
+                <pre class="mermaid">{idx_mermaid}</pre>
+            </div>"""
+
+        trust_color = "#4CAF50" if trust > 0.7 else "#FF9800" if trust > 0.3 else "#f44336"
+        flow_sections.append(f"""
+        <div style="margin-bottom:32px;">
+            <h3 style="margin:0 0 12px;font-size:17px;border-bottom:1px solid #eee;padding-bottom:8px;">
+                Flow {idx+1}: {flow_name}
+                <span style="color:{trust_color};font-weight:700;margin-left:12px;">
+                    {trust:.0%} trust</span>
+            </h3>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;">
+                {panels_html}
+            </div>
+        </div>""")
+
+    if not flow_sections:
+        return "<p>No call tree diagrams to display.</p>"
+
+    # Build a self-contained HTML page and embed it in an iframe via srcdoc.
+    # This bypasses Gradio's script sandboxing.
+    inner_html = f"""<!DOCTYPE html>
+<html><head>
+<style>
+  body {{ font-family: system-ui, -apple-system, sans-serif; margin: 16px; background: #fafafa; }}
+  .mermaid {{ background: #fff; }}
+</style>
+</head><body>
+<h2 style="margin:0 0 20px;">Call Tree Diagrams</h2>
+{''.join(flow_sections)}
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({{
+    startOnLoad: true,
+    theme: 'default',
+    flowchart: {{ curve: 'basis', padding: 12 }},
+    securityLevel: 'loose'
+  }});
+</script>
+</body></html>"""
+
+    # Escape quotes for srcdoc attribute
+    escaped = inner_html.replace("&", "&amp;").replace('"', "&quot;")
+
+    # Calculate a reasonable height based on content
+    height = max(400, len(flow_sections) * 350)
+
+    return (
+        f'<iframe srcdoc="{escaped}" '
+        f'style="width:100%;height:{height}px;border:1px solid #e0e0e0;border-radius:8px;" '
+        f'sandbox="allow-scripts"></iframe>'
+    )
 
 
 def _format_agent_output(

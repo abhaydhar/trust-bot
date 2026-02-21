@@ -85,6 +85,7 @@ class ValidationPipeline:
         )
 
         # --- Agent 2: Build from indexed codebase ---
+        root_class = neo4j_graph.metadata.get("root_class_name", "")
         if progress_callback:
             progress_callback("agent2", f"Building call graph from index (root: {root_function})...")
 
@@ -103,6 +104,8 @@ class ValidationPipeline:
             index_graph = await agent2.build(
                 root_function=root_function,
                 execution_flow_id=execution_flow_key,
+                root_class=root_class,
+                root_file=root_file,
             )
 
         logger.info(

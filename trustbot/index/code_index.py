@@ -136,7 +136,20 @@ class CodeIndex:
                             (name, rel_path, lang, chunk.class_name or "", start.isoformat()),
                         )
                     except sqlite3.IntegrityError:
-                        # Duplicate (function_name, file_path) pair - skip
+                        # Duplicate (function_name, file_path). If the new row
+                        # has a class_name and the existing one doesn't, update it.
+                        # This handles Delphi forward declarations (no class) vs
+                        # implementations (TClassName.Method → has class).
+                        if chunk.class_name:
+                            conn.execute(
+                                """
+                                UPDATE code_index
+                                SET class_name = ?
+                                WHERE function_name = ? AND file_path = ?
+                                  AND (class_name IS NULL OR class_name = '')
+                                """,
+                                (chunk.class_name, name, rel_path),
+                            )
                         continue
                     total_functions += 1
                 total_files += 1
