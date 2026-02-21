@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from neo4j import AsyncGraphDatabase, AsyncDriver
+from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
 
 from trustbot.config import settings
 from trustbot.models.graph import CallEdge, CallGraph, ExecutionFlow, ProjectCallGraph, Snippet
 from trustbot.tools.base import BaseTool
 
 logger = logging.getLogger("trustbot.tools.neo4j")
+
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 1.5  # seconds, exponential
 
 
 class Neo4jTool(BaseTool):
@@ -18,6 +23,12 @@ class Neo4jTool(BaseTool):
 
     Provides structured access to ExecutionFlow nodes, Snippet nodes,
     and the CALLS/INVOKES relationships that form the call graph.
+
+    Enterprise best-practices applied:
+    - Connection pool with configurable size and lifetime
+    - TCP connect and acquisition timeouts
+    - Automatic retry with exponential backoff on transient failures
+    - keep_alive to detect dead connections early
     """
 
     name = "neo4j"
@@ -34,9 +45,24 @@ class Neo4jTool(BaseTool):
         self._driver = AsyncGraphDatabase.driver(
             settings.neo4j_uri,
             auth=(settings.neo4j_user, settings.neo4j_password),
+            max_connection_lifetime=settings.neo4j_max_connection_lifetime,
+            max_connection_pool_size=settings.neo4j_max_connection_pool_size,
+            connection_acquisition_timeout=settings.neo4j_connection_acquisition_timeout,
+            connection_timeout=settings.neo4j_connection_timeout,
+            max_transaction_retry_time=settings.neo4j_max_transaction_retry_time,
+            keep_alive=settings.neo4j_keep_alive,
         )
         await self._driver.verify_connectivity()
-        logger.info("Connected to Neo4j at %s", settings.neo4j_uri)
+        logger.info(
+            "Connected to Neo4j at %s (pool_size=%d, conn_lifetime=%ds, "
+            "acquisition_timeout=%ds, connect_timeout=%ds, keep_alive=%s)",
+            settings.neo4j_uri,
+            settings.neo4j_max_connection_pool_size,
+            settings.neo4j_max_connection_lifetime,
+            settings.neo4j_connection_acquisition_timeout,
+            settings.neo4j_connection_timeout,
+            settings.neo4j_keep_alive,
+        )
 
     async def shutdown(self) -> None:
         if self._driver:
@@ -49,20 +75,48 @@ class Neo4jTool(BaseTool):
             raise RuntimeError("Neo4j driver not initialized. Call initialize() first.")
         return self._driver
 
+    async def _run_with_retry(self, coro_factory, description: str = "query"):
+        """
+        Execute a coroutine factory with retry on transient Neo4j failures.
+        
+        coro_factory is a zero-arg callable that returns a fresh coroutine
+        each time (necessary because a coroutine can only be awaited once).
+        """
+        last_error = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                return await coro_factory()
+            except (ServiceUnavailable, SessionExpired, TransientError, OSError) as exc:
+                last_error = exc
+                if attempt < MAX_RETRIES:
+                    wait = RETRY_BACKOFF_BASE ** attempt
+                    logger.warning(
+                        "Neo4j %s failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                        description, attempt, MAX_RETRIES, exc, wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(
+                        "Neo4j %s failed after %d attempts: %s",
+                        description, MAX_RETRIES, exc,
+                    )
+        raise last_error
+
     async def get_execution_flow(self, key: str) -> ExecutionFlow:
         """Fetch an ExecutionFlow node by its key, returning all properties."""
         query = """
         MATCH (ef:ExecutionFlow {key: $key})
         RETURN ef
         """
-        async with self.driver.session() as session:
-            result = await session.run(query, key=key)
-            record = await result.single()
-
-        if record is None:
-            raise ValueError(f"No ExecutionFlow found with key '{key}'")
-
-        return self._node_to_execution_flow(record["ef"])
+        async def _do():
+            async with self.driver.session() as session:
+                result = await session.run(query, key=key)
+                record = await result.single()
+            if record is None:
+                raise ValueError(f"No ExecutionFlow found with key '{key}'")
+            return self._node_to_execution_flow(record["ef"])
+        
+        return await self._run_with_retry(_do, f"get_execution_flow({key})")
 
     async def get_execution_flows_by_project(
         self, project_id: int, run_id: int
@@ -73,22 +127,25 @@ class Neo4jTool(BaseTool):
         RETURN ef
         ORDER BY ef.name
         """
-        flows: list[ExecutionFlow] = []
-        async with self.driver.session() as session:
-            result = await session.run(query, pid=project_id, rid=run_id)
-            async for record in result:
-                flows.append(self._node_to_execution_flow(record["ef"]))
-
-        if not flows:
-            raise ValueError(
-                f"No ExecutionFlows found for project_id={project_id}, run_id={run_id}"
+        async def _do():
+            flows: list[ExecutionFlow] = []
+            async with self.driver.session() as session:
+                result = await session.run(query, pid=project_id, rid=run_id)
+                async for record in result:
+                    flows.append(self._node_to_execution_flow(record["ef"]))
+            if not flows:
+                raise ValueError(
+                    f"No ExecutionFlows found for project_id={project_id}, run_id={run_id}"
+                )
+            logger.info(
+                "Found %d ExecutionFlows for project_id=%d, run_id=%d",
+                len(flows), project_id, run_id,
             )
-
-        logger.info(
-            "Found %d ExecutionFlows for project_id=%d, run_id=%d",
-            len(flows), project_id, run_id,
+            return flows
+        
+        return await self._run_with_retry(
+            _do, f"get_execution_flows_by_project({project_id}, {run_id})"
         )
-        return flows
 
     async def get_project_call_graph(
         self, project_id: int, run_id: int
@@ -151,16 +208,43 @@ class Neo4jTool(BaseTool):
             RETURN s, r
             """
 
-        snippets: list[Snippet] = []
-        async with self.driver.session() as session:
-            result = await session.run(query, key=key)
-            async for record in result:
-                node = record["s"]
-                rel = record["r"]
-                snippets.append(self._node_to_snippet(
-                    node, starts_flow=bool(rel.get("STARTS_FLOW", False))
-                ))
-        return snippets
+        async def _do():
+            snippets: list[Snippet] = []
+            async with self.driver.session() as session:
+                result = await session.run(query, key=key)
+                async for record in result:
+                    node = record["s"]
+                    rel = record["r"]
+                    snippets.append(self._node_to_snippet(
+                        node, starts_flow=bool(rel.get("STARTS_FLOW", False))
+                    ))
+            return snippets
+        
+        return await self._run_with_retry(_do, f"get_flow_participants({key})")
+
+    async def get_root_snippet(self, key: str) -> Snippet | None:
+        """
+        Find the ROOT Snippet for an ExecutionFlow — the first node with
+        type='ROOT' and STARTS_FLOW=true. This is the entry point from which
+        the call graph branches outward.
+        """
+        query = """
+        MATCH (ef:ExecutionFlow {key: $key})<-[r:PARTICIPATES_IN_FLOW]-(s:Snippet)
+        WHERE s.type = 'ROOT' AND r.STARTS_FLOW = true
+        RETURN s, r
+        LIMIT 1
+        """
+        async def _do():
+            async with self.driver.session() as session:
+                result = await session.run(query, key=key)
+                record = await result.single()
+            if record is None:
+                return None
+            return self._node_to_snippet(
+                record["s"], starts_flow=True
+            )
+        
+        return await self._run_with_retry(_do, f"get_root_snippet({key})")
 
     def _node_to_snippet(self, node, starts_flow: bool = False) -> Snippet:
         """Convert a Neo4j Snippet node to our Snippet model."""
@@ -200,7 +284,6 @@ class Neo4jTool(BaseTool):
         for s in all_participants:
             snippets[s.id] = s
 
-        # Get all CALLS edges from participating snippets
         query = """
         MATCH (ef:ExecutionFlow {key: $key})<-[:PARTICIPATES_IN_FLOW]-(s:Snippet)
         OPTIONAL MATCH (s)-[c:CALLS]->(target:Snippet)
@@ -209,40 +292,35 @@ class Neo4jTool(BaseTool):
                target
         """
 
-        edges: list[CallEdge] = []
-        seen_edges: set[tuple[str, str, int]] = set()
-
-        async with self.driver.session() as session:
-            result = await session.run(query, key=key)
-            async for record in result:
-                caller_key = record["caller_key"]
-                callee_key = record["callee_key"]
-
-                if callee_key is None:
-                    continue
-
-                call_props = dict(record["call_props"]) if record["call_props"] else {}
-                exec_order = call_props.get("execution_order", 0)
-
-                # Use (caller, callee, execution_order) to uniquely identify edges
-                # since the same function can be called multiple times
-                edge_key = (caller_key, callee_key, exec_order)
-                if edge_key in seen_edges:
-                    continue
-                seen_edges.add(edge_key)
-
-                # Add callee to snippets if not already there
-                if callee_key not in snippets and record["target"] is not None:
-                    snippets[callee_key] = self._node_to_snippet(record["target"])
-
-                edges.append(
-                    CallEdge(
-                        caller_id=caller_key,
-                        callee_id=callee_key,
-                        relationship_type="CALLS",
-                        properties=call_props,
+        async def _do():
+            edges: list[CallEdge] = []
+            seen_edges: set[tuple[str, str, int]] = set()
+            async with self.driver.session() as session:
+                result = await session.run(query, key=key)
+                async for record in result:
+                    caller_key = record["caller_key"]
+                    callee_key = record["callee_key"]
+                    if callee_key is None:
+                        continue
+                    call_props = dict(record["call_props"]) if record["call_props"] else {}
+                    exec_order = call_props.get("execution_order", 0)
+                    edge_key = (caller_key, callee_key, exec_order)
+                    if edge_key in seen_edges:
+                        continue
+                    seen_edges.add(edge_key)
+                    if callee_key not in snippets and record["target"] is not None:
+                        snippets[callee_key] = self._node_to_snippet(record["target"])
+                    edges.append(
+                        CallEdge(
+                            caller_id=caller_key,
+                            callee_id=callee_key,
+                            relationship_type="CALLS",
+                            properties=call_props,
+                        )
                     )
-                )
+            return edges
+
+        edges = await self._run_with_retry(_do, f"get_call_graph({key})")
 
         logger.info(
             "Call graph for '%s': %d snippets, %d edges, %d entry points",
@@ -269,9 +347,12 @@ class Neo4jTool(BaseTool):
                     f"Write operation '{token}' is not allowed. This tool is read-only."
                 )
 
-        results: list[dict] = []
-        async with self.driver.session() as session:
-            result = await session.run(cypher, params or {})
-            async for record in result:
-                results.append(dict(record))
-        return results
+        async def _do():
+            results: list[dict] = []
+            async with self.driver.session() as session:
+                result = await session.run(cypher, params or {})
+                async for record in result:
+                    results.append(dict(record))
+            return results
+        
+        return await self._run_with_retry(_do, "cypher_query")

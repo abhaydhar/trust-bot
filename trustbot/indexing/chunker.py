@@ -72,10 +72,16 @@ FUNC_DEF_PATTERNS: dict[str, list[re.Pattern]] = {
         re.compile(r"(?:export\s+)?interface\s+(?P<name>\w+)", re.MULTILINE),
     ],
     "delphi": [
-        # Delphi function/procedure patterns
-        re.compile(r"^\s*(?:function|procedure)\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
-        re.compile(r"^\s*constructor\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
-        re.compile(r"^\s*destructor\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
+        # Delphi implementation: procedure TClassName.MethodName / function TClassName.MethodName
+        # The optional (?:(\w+)\.)? captures the class prefix so "name" gets the method name.
+        re.compile(
+            r"^\s*(?:function|procedure)\s+(?:(?P<delphi_class>\w+)\.)?(?P<name>\w+)",
+            re.MULTILINE | re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*(?:constructor|destructor)\s+(?:(?P<delphi_class>\w+)\.)?(?P<name>\w+)",
+            re.MULTILINE | re.IGNORECASE,
+        ),
     ],
     "cobol": [
         # COBOL paragraph/section patterns
@@ -162,14 +168,21 @@ def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
         ]
 
     # Find all function/class definition positions
-    definitions: list[tuple[int, str, str]] = []  # (line_num, name, type)
+    # Each entry: (line_num, name, kind, explicit_class)
+    definitions: list[tuple[int, str, str, str]] = []
     for pattern in patterns:
         for match in pattern.finditer(content):
             name = match.group("name")
             line_num = content[:match.start()].count("\n") + 1
             indent = match.groupdict().get("indent", "")
-            kind = "class" if "class" in match.group(0) else "function"
-            definitions.append((line_num, name, kind))
+            kind = "class" if "class" in match.group(0).lower().split() else "function"
+            # Delphi: extract explicit class from "TClassName.MethodName" patterns
+            explicit_class = ""
+            try:
+                explicit_class = match.group("delphi_class") or ""
+            except IndexError:
+                pass
+            definitions.append((line_num, name, kind, explicit_class))
 
     definitions.sort(key=lambda d: d[0])
 
@@ -189,7 +202,7 @@ def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
     chunks: list[CodeChunk] = []
     current_class = ""
 
-    for i, (line_num, name, kind) in enumerate(definitions):
+    for i, (line_num, name, kind, explicit_class) in enumerate(definitions):
         if kind == "class":
             current_class = name
 
@@ -200,12 +213,20 @@ def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
         else:
             end = len(lines)
 
-        # For Python, trim trailing blank lines
+        # Trim trailing blank lines
         while end > start and not lines[end - 1].strip():
             end -= 1
 
         chunk_content = "\n".join(lines[start - 1 : end])
-        class_name = current_class if kind == "function" else ""
+
+        # Use explicit class (e.g. TfrmMain from "procedure TfrmMain.MethodName")
+        # falling back to the current_class from class definitions
+        if explicit_class:
+            class_name = explicit_class
+        elif kind == "function":
+            class_name = current_class
+        else:
+            class_name = ""
 
         chunks.append(
             CodeChunk(

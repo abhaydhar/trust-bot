@@ -4,7 +4,8 @@ Normalization Agent — resolves function identities to canonical form.
 Transforms edges from both Agent 1 and Agent 2 before comparison:
 - Trim whitespace, normalize to uppercase
 - Resolve aliases via configurable alias table
-- Strip language-specific prefixes/suffixes
+- Normalize file paths (absolute → filename only)
+- Carry class_name through for comparison
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from trustbot.models.agentic import (
     CallGraphOutput,
     ExtractionMethod,
     GraphSource,
+    normalize_file_path,
 )
 
 logger = logging.getLogger("trustbot.agents.normalization")
@@ -38,8 +40,10 @@ class NormalizationAgent:
                 CallGraphEdge(
                     caller=caller,
                     callee=callee,
-                    caller_file=e.caller_file,
-                    callee_file=e.callee_file,
+                    caller_file=normalize_file_path(e.caller_file),
+                    callee_file=normalize_file_path(e.callee_file),
+                    caller_class=e.caller_class.upper().strip(),
+                    callee_class=e.callee_class.upper().strip(),
                     depth=e.depth,
                     extraction_method=e.extraction_method,
                     confidence=e.confidence,

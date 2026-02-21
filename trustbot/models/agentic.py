@@ -45,9 +45,25 @@ class CallGraphEdge(BaseModel):
     callee: str
     caller_file: str = ""
     callee_file: str = ""
+    caller_class: str = ""
+    callee_class: str = ""
     depth: int = 1
     extraction_method: ExtractionMethod = ExtractionMethod.NEO4J
     confidence: float = 1.0
+
+
+def normalize_file_path(path: str) -> str:
+    """
+    Normalize a file path for comparison.
+    Handles absolute Windows paths, forward/backslash, casing.
+    Returns just the filename (e.g. 'PaymentService.pas') uppercased.
+    """
+    if not path:
+        return ""
+    p = path.replace("\\", "/").strip()
+    # Take just the filename portion
+    filename = p.rsplit("/", 1)[-1]
+    return filename.upper().strip()
 
 
 class CallGraphOutput(BaseModel):
@@ -60,8 +76,25 @@ class CallGraphOutput(BaseModel):
     unresolved_callees: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
 
-    def to_comparable_edges(self) -> set[tuple[str, str]]:
-        """Return set of (caller, callee) for diffing."""
+    def to_comparable_edges(self) -> set[tuple[str, str, str, str, str, str]]:
+        """
+        Return set of (caller, caller_class, caller_file, callee, callee_class, callee_file)
+        for diffing. All values uppercased and file paths normalized to filename only.
+        """
+        result = set()
+        for e in self.edges:
+            result.add((
+                e.caller.upper().strip(),
+                e.caller_class.upper().strip(),
+                normalize_file_path(e.caller_file),
+                e.callee.upper().strip(),
+                e.callee_class.upper().strip(),
+                normalize_file_path(e.callee_file),
+            ))
+        return result
+
+    def to_comparable_edges_by_name(self) -> set[tuple[str, str]]:
+        """Legacy: match only on (caller_name, callee_name) for fallback."""
         return {(e.caller.upper().strip(), e.callee.upper().strip()) for e in self.edges}
 
 

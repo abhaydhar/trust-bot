@@ -19,6 +19,7 @@ class ReportAgent:
 
     def generate_markdown(self, result: VerificationResult) -> str:
         """Generate a Markdown validation report."""
+        meta = result.metadata
         lines = [
             f"# Validation Report: {result.execution_flow_id}",
             "",
@@ -32,12 +33,28 @@ class ReportAgent:
             "## Summary",
             "",
             f"- **Confirmed edges**: {len(result.confirmed_edges)}",
+        ]
+        if meta.get("match_full") is not None:
+            lines.append(f"  - Full match (name+class+file): {meta.get('match_full', 0)}")
+            lines.append(f"  - Name+file match: {meta.get('match_name_file', 0)}")
+            lines.append(f"  - Name-only match: {meta.get('match_name_only', 0)}")
+        lines.extend([
             f"- **Phantom edges** (Neo4j only): {len(result.phantom_edges)}",
             f"- **Missing edges** (filesystem only): {len(result.missing_edges)}",
             f"- **Conflicted edges**: {len(result.conflicted_edges)}",
             f"- **Unresolved callees**: {len(result.unresolved_callees)}",
             "",
-        ]
+        ])
+
+        if result.confirmed_edges:
+            lines.extend(["## Confirmed Edges", ""])
+            lines.append("| Caller | Callee | Trust | Match Type |")
+            lines.append("|--------|--------|-------|------------|")
+            for e in result.confirmed_edges[:30]:
+                lines.append(f"| `{e.caller}` | `{e.callee}` | {e.trust_score:.2f} | {e.details} |")
+            if len(result.confirmed_edges) > 30:
+                lines.append(f"| ... | +{len(result.confirmed_edges) - 30} more | | |")
+            lines.append("")
 
         if result.phantom_edges:
             lines.extend(["## Phantom Edges (Neo4j only)", ""])

@@ -7,6 +7,12 @@ class Settings(BaseSettings):
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
+    neo4j_max_connection_lifetime: int = 3600  # seconds before a connection is recycled
+    neo4j_max_connection_pool_size: int = 50
+    neo4j_connection_acquisition_timeout: int = 60  # seconds to wait for a pooled connection
+    neo4j_connection_timeout: int = 30  # TCP connect timeout in seconds
+    neo4j_max_transaction_retry_time: int = 30  # seconds to retry failed transactions
+    neo4j_keep_alive: bool = True
 
     litellm_api_base: str = ""
     litellm_api_key: str = ""
