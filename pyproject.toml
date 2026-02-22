@@ -14,7 +14,7 @@ dependencies = [
     "neo4j>=5.26.0",
     "litellm>=1.55.0",
     "chromadb>=0.5.0",
-    "gradio>=5.0.0",
+    "nicegui>=2.0.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
@@ -26,6 +26,9 @@ dependencies = [
     "playwright>=1.49.0",
     # Git repository support
     "gitpython>=3.1.0",
+    # Call tree visualization
+    "networkx>=3.0",
+    "matplotlib>=3.8.0",
 ]
 
 [project.optional-dependencies]

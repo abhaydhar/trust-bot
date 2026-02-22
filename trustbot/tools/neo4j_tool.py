@@ -318,6 +318,8 @@ class Neo4jTool(BaseTool):
                             properties=call_props,
                         )
                     )
+            # Sort by execution_order to preserve call sequence from Neo4j
+            edges.sort(key=lambda e: e.properties.get("execution_order", 0))
             return edges
 
         edges = await self._run_with_retry(_do, f"get_call_graph({key})")

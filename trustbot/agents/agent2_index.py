@@ -12,7 +12,6 @@ NO access to Neo4j — operates purely on the local index (SQLite).
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from trustbot.index.code_index import CodeIndex
 from trustbot.models.agentic import (
@@ -51,6 +50,66 @@ def _extract_func_name(chunk_id: str) -> str:
     return func_name or chunk_id.strip()
 
 
+def _derive_project_prefix(
+    root_file: str,
+    index_file_paths: list[str],
+) -> str:
+    """
+    Derive the project directory prefix from the Neo4j root_file path
+    by matching it against paths stored in the local index.
+
+    Neo4j stores absolute paths like:
+        /mnt/storage/.../011-MultiLevelList/src/Unit1.dfm
+    The index stores relative paths like:
+        011-MultiLevelList\\src\\Unit1.pas
+
+    Strategy: extract the filename from root_file, find matching index
+    paths, and return their common top-level directory.
+    """
+    if not root_file:
+        return ""
+
+    # Normalize and extract filename
+    normalized = root_file.replace("\\", "/").strip()
+    root_filename = normalized.rsplit("/", 1)[-1].upper()
+
+    # Find index paths whose filename matches the root file
+    candidates: list[str] = []
+    for fp in index_file_paths:
+        fp_norm = fp.replace("\\", "/")
+        fp_filename = fp_norm.rsplit("/", 1)[-1].upper()
+        if fp_filename == root_filename:
+            candidates.append(fp_norm)
+
+    if not candidates:
+        # Try matching without extension (dfm → pas, etc.)
+        root_stem = root_filename.rsplit(".", 1)[0] if "." in root_filename else root_filename
+        for fp in index_file_paths:
+            fp_norm = fp.replace("\\", "/")
+            fp_filename = fp_norm.rsplit("/", 1)[-1].upper()
+            fp_stem = fp_filename.rsplit(".", 1)[0] if "." in fp_filename else fp_filename
+            if fp_stem == root_stem:
+                candidates.append(fp_norm)
+
+    if not candidates:
+        return ""
+
+    # Extract the top-level directory (project prefix) from the first match
+    first = candidates[0]
+    parts = first.split("/")
+    if len(parts) >= 2:
+        return parts[0]
+    return ""
+
+
+def _path_matches_prefix(file_path: str, prefix: str) -> bool:
+    """Check if a file path belongs to the given project prefix."""
+    if not prefix:
+        return True
+    normalized = file_path.replace("\\", "/")
+    return normalized.upper().startswith(prefix.upper())
+
+
 class Agent2IndexBuilder:
     """
     Agent that builds a call graph from the indexed codebase.
@@ -68,6 +127,7 @@ class Agent2IndexBuilder:
         execution_flow_id: str = "",
         root_class: str = "",
         root_file: str = "",
+        neo4j_hint_files: set[str] | None = None,
     ) -> CallGraphOutput:
         """
         Build a call graph starting from root_function by traversing
@@ -83,8 +143,27 @@ class Agent2IndexBuilder:
         visited: set[str] = set()
 
         all_edges = self._index.get_edges()
+        all_functions = self._get_all_functions_with_class()
 
+        # Derive project prefix from root_file to scope all lookups.
+        # This prevents cross-project contamination when the index spans
+        # multiple projects (e.g. 011-MultiLevelList vs 015-MVC-En-Delphi).
+        all_file_paths = [fp for _, fp, _ in all_functions]
+        project_prefix = _derive_project_prefix(root_file, all_file_paths)
+        if project_prefix:
+            logger.info(
+                "Scoping Agent 2 to project prefix '%s' (from root_file '%s')",
+                project_prefix, root_file,
+            )
+        if neo4j_hint_files:
+            logger.info(
+                "Agent 1 provided %d hint files for scope constraint",
+                len(neo4j_hint_files),
+            )
+
+        # Build edge_map filtered to the project scope
         edge_map: dict[str, list[dict]] = {}
+        skipped_cross_project = 0
         for e in all_edges:
             raw_caller = e.get("from") or e.get("caller", "")
             raw_callee = e.get("to") or e.get("callee", "")
@@ -94,6 +173,12 @@ class Agent2IndexBuilder:
                 caller_name = _extract_func_name(raw_caller)
             if not callee_name:
                 callee_name = _extract_func_name(raw_callee)
+
+            # Skip edges whose caller is outside the project scope
+            if project_prefix and not _path_matches_prefix(caller_file, project_prefix):
+                skipped_cross_project += 1
+                continue
+
             key = caller_name.upper().strip()
             edge_map.setdefault(key, []).append({
                 "caller_name": caller_name,
@@ -107,10 +192,19 @@ class Agent2IndexBuilder:
                 "confidence": e.get("confidence", 0.8),
             })
 
-        all_functions = self._get_all_functions_with_class()
+        if skipped_cross_project:
+            logger.info(
+                "Filtered out %d cross-project edges (kept %d in-scope)",
+                skipped_cross_project,
+                sum(len(v) for v in edge_map.values()),
+            )
+
+        # Build function lookups scoped to the same project
         func_to_file: dict[str, str] = {}
         func_to_class: dict[str, str] = {}
         for fn, fp, cn in all_functions:
+            if project_prefix and not _path_matches_prefix(fp, project_prefix):
+                continue
             key = fn.upper().strip()
             func_to_file[key] = fp
             func_to_class[key] = cn or ""
@@ -181,6 +275,7 @@ class Agent2IndexBuilder:
             unresolved,
             visited,
             depth=1,
+            project_prefix=project_prefix,
         )
 
         # If primary traversal found nothing and we have class members, traverse
@@ -206,6 +301,7 @@ class Agent2IndexBuilder:
                     unresolved,
                     visited,
                     depth=1,
+                    project_prefix=project_prefix,
                 )
 
         sample_index_funcs = sorted(func_to_file.keys())[:15]
@@ -222,8 +318,13 @@ class Agent2IndexBuilder:
                 "total_nodes": len(
                     set(e.caller for e in edges) | set(e.callee for e in edges)
                 ),
-                "index_functions": len(all_functions),
-                "index_edges": len(all_edges),
+                "index_functions": len(func_to_file),
+                "index_edges": sum(len(v) for v in edge_map.values()),
+                "total_index_functions": len(all_functions),
+                "total_index_edges": len(all_edges),
+                "project_prefix": project_prefix,
+                "skipped_cross_project_edges": skipped_cross_project,
+                "neo4j_hint_files": sorted(neo4j_hint_files)[:20] if neo4j_hint_files else [],
                 "original_root": original_root,
                 "resolved_root": root_function,
                 "resolved_via": resolved_via,
@@ -254,6 +355,7 @@ class Agent2IndexBuilder:
         visited: set[str],
         depth: int,
         max_depth: int = 50,
+        project_prefix: str = "",
     ) -> None:
         if depth > max_depth:
             return
@@ -267,16 +369,32 @@ class Agent2IndexBuilder:
         caller_class = func_to_class.get(key, "")
 
         outgoing = edge_map.get(key, [])
+        callee_order = 0
         for e in outgoing:
             callee_name = e["callee_name"]
             callee_key = callee_name.upper().strip()
-            callee_file = e.get("callee_file") or func_to_file.get(callee_key, "")
-            callee_class = e.get("callee_class") or func_to_class.get(callee_key, "")
+
+            # Skip self-referencing edges (forward decl -> implementation of same func)
+            if callee_key == key:
+                continue
+
+            # Prefer project-scoped func_to_file over the edge's callee_file,
+            # since the edge may reference a cross-project file due to name
+            # collisions at index time.
+            callee_file = func_to_file.get(callee_key, "") or e.get("callee_file", "")
+            callee_class = func_to_class.get(callee_key, "") or e.get("callee_class", "")
+
+            # If the resolved callee file is outside our project, skip it
+            if project_prefix and callee_file and not _path_matches_prefix(callee_file, project_prefix):
+                if callee_name not in unresolved:
+                    unresolved.append(callee_name)
+                continue
 
             if not callee_file and callee_name not in unresolved:
                 unresolved.append(callee_name)
                 continue
 
+            callee_order += 1
             edges.append(
                 CallGraphEdge(
                     caller=function_name,
@@ -286,6 +404,7 @@ class Agent2IndexBuilder:
                     caller_class=caller_class,
                     callee_class=callee_class,
                     depth=depth,
+                    execution_order=callee_order,
                     extraction_method=ExtractionMethod.REGEX,
                     confidence=e.get("confidence", 0.8),
                 )
@@ -301,6 +420,7 @@ class Agent2IndexBuilder:
                 visited,
                 depth + 1,
                 max_depth,
+                project_prefix,
             )
 
     def _get_all_functions(self) -> list[tuple[str, str]]:

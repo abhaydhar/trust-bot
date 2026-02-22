@@ -66,6 +66,8 @@ class Agent1Neo4jFetcher:
             caller_class = caller.class_name if caller else ""
             callee_class = callee.class_name if callee else ""
 
+            exec_order = edge.properties.get("execution_order", 0)
+
             edges.append(
                 CallGraphEdge(
                     caller=caller_name,
@@ -75,6 +77,7 @@ class Agent1Neo4jFetcher:
                     caller_class=caller_class,
                     callee_class=callee_class,
                     depth=1,
+                    execution_order=exec_order,
                     extraction_method=ExtractionMethod.NEO4J,
                     confidence=1.0,
                 )

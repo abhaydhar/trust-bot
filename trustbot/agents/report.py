@@ -78,6 +78,28 @@ class ReportAgent:
                 lines.append(f"- `{u}`")
             lines.append("")
 
+        # Execution order comparison
+        order_mismatches = meta.get("execution_order_mismatches", [])
+        order_matches = meta.get("execution_order_matches", 0)
+        if order_mismatches or order_matches:
+            lines.extend(["## Execution Order", ""])
+            lines.append(
+                f"- **Callers with correct order**: {order_matches}"
+            )
+            if order_mismatches:
+                lines.append(
+                    f"- **Callers with order mismatch**: {len(order_mismatches)}"
+                )
+                lines.append("")
+                for m in order_mismatches[:10]:
+                    lines.append(f"**`{m['caller']}`**:")
+                    lines.append(f"  - Neo4j order: {' -> '.join(m['neo4j_order'])}")
+                    lines.append(f"  - Index order:  {' -> '.join(m['index_order'])}")
+                    lines.append("")
+            else:
+                lines.append("- All confirmed callers have matching execution order")
+                lines.append("")
+
         return "\n".join(lines)
 
     def generate_summary(self, result: VerificationResult) -> str:

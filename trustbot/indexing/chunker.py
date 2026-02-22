@@ -134,6 +134,81 @@ class CodeChunk:
             self.chunk_id = f"{self.file_path}::{self.class_name}::{self.function_name}"
 
 
+def _parse_dfm_file(content: str, rel_path: str) -> list[CodeChunk]:
+    """
+    Parse a Delphi .dfm form file to extract:
+    - A chunk for each top-level form object (e.g., TForm1)
+    - Event handler bindings stored in chunk.metadata["event_handlers"]
+
+    DFM format example:
+        object Form1: TForm1
+          OnCreate = FormCreate
+          object Button1: TButton
+            OnClick = Button1Click
+          end
+        end
+
+    Each form produces a CodeChunk whose metadata contains the event bindings,
+    which the call graph builder uses to create form-to-handler edges.
+    """
+    chunks: list[CodeChunk] = []
+    lines = content.splitlines()
+
+    # Match top-level "object Name: TClassName"
+    form_pattern = re.compile(
+        r"^\s*object\s+(?P<name>\w+)\s*:\s*(?P<class>\w+)",
+        re.IGNORECASE,
+    )
+    # Match "OnXxx = HandlerName" event bindings
+    event_pattern = re.compile(
+        r"^\s*On\w+\s*=\s*(?P<handler>\w+)",
+        re.IGNORECASE,
+    )
+
+    current_form_name = ""
+    current_form_class = ""
+    current_form_start = 0
+    event_handlers: list[str] = []
+    depth = 0
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+
+        if form_pattern.match(stripped) and depth == 0:
+            m = form_pattern.match(stripped)
+            current_form_name = m.group("name")
+            current_form_class = m.group("class")
+            current_form_start = i
+            event_handlers = []
+            depth = 1
+        elif stripped.lower().startswith("object ") and depth > 0:
+            depth += 1
+            # Also check events on nested objects
+            em = event_pattern.match(stripped)
+            if em:
+                event_handlers.append(em.group("handler"))
+        elif stripped.lower() == "end" and depth > 0:
+            depth -= 1
+            if depth == 0 and current_form_name:
+                chunks.append(CodeChunk(
+                    file_path=rel_path,
+                    language="delphi",
+                    function_name=current_form_name,
+                    class_name=current_form_class,
+                    line_start=current_form_start,
+                    line_end=i,
+                    content="\n".join(lines[current_form_start - 1:i]),
+                    metadata={"event_handlers": event_handlers, "is_dfm_form": True},
+                ))
+                current_form_name = ""
+        else:
+            em = event_pattern.match(stripped)
+            if em and depth > 0:
+                event_handlers.append(em.group("handler"))
+
+    return chunks
+
+
 def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
     """
     Split a single source file into function-level code chunks.
@@ -151,6 +226,10 @@ def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
 
     if not lines:
         return []
+
+    # .dfm files need special parsing (declarative form definitions)
+    if ext.lower() == ".dfm":
+        return _parse_dfm_file(content, rel_path)
 
     patterns = FUNC_DEF_PATTERNS.get(language, [])
     if not patterns:

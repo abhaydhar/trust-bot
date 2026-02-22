@@ -23,7 +23,14 @@ from trustbot.models.agentic import (
 )
 from trustbot.agents.normalization import NormalizationAgent
 from trustbot.agents.verification import VerificationAgent
-from trustbot.agents.agent2_index import _parse_chunk_id, _extract_func_name
+from trustbot.agents.agent2_index import (
+    _parse_chunk_id,
+    _extract_func_name,
+    _derive_project_prefix,
+    _path_matches_prefix,
+)
+from trustbot.indexing.call_graph_builder import _common_prefix_length, _resolve_callee
+from trustbot.indexing.chunker import CodeChunk
 
 
 # ─── normalize_file_path ─────────────────────────────────────────────
@@ -333,6 +340,31 @@ class TestVerificationAgentTierMatching:
         assert len(result.phantom_edges) == 1
         assert result.phantom_edges[0].callee == "X"
 
+    def test_bare_name_match_qualified_neo4j(self):
+        """Neo4j uses qualified name (TForm1.Button2Click), index uses bare (Button2Click) → match on bare."""
+        neo = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.NEO4J,
+            root_function="TForm1",
+            edges=[self._neo4j_edge("TForm1.Button2Click", "InitialiseEcran")],
+        )
+        fs = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.FILESYSTEM,
+            root_function="Button2Click",
+            edges=[self._index_edge("Button2Click", "InitialiseEcran")],
+        )
+        normalizer = NormalizationAgent()
+        verifier = VerificationAgent()
+        result = verifier.verify(normalizer.normalize(neo), normalizer.normalize(fs))
+
+        assert len(result.confirmed_edges) == 1
+        assert result.confirmed_edges[0].caller == "TFORM1.BUTTON2CLICK"
+        assert result.confirmed_edges[0].callee == "INITIALISEECRAN"
+        assert "bare name" in result.confirmed_edges[0].details.lower()
+        assert len(result.phantom_edges) == 0
+        assert len(result.missing_edges) == 0
+
     def test_missing_edge_in_index_only(self):
         """Edge in Index but not in Neo4j → missing."""
         neo = CallGraphOutput(
@@ -542,3 +574,276 @@ def test_spec_flow_document() -> None:
     )
     assert spec.root_function == "main"
     assert spec.root_file_path == "src/main.py"
+
+
+# ─── Project prefix derivation (Agent 2 scoping) ─────────────────────
+
+
+class TestDeriveProjectPrefix:
+    """Verify project prefix extraction from Neo4j root_file + index paths."""
+
+    def test_matches_dfm_to_pas_by_stem(self):
+        root_file = "/mnt/storage/Delphi-Test/011-MultiLevelList/src/Unit1.dfm"
+        index_paths = [
+            "011-MultiLevelList\\src\\Unit1.pas",
+            "015-MVC-En-Delphi\\Unit1.pas",
+        ]
+        assert _derive_project_prefix(root_file, index_paths) == "011-MultiLevelList"
+
+    def test_exact_filename_match(self):
+        root_file = "/mnt/storage/MyProject/src/Main.pas"
+        index_paths = [
+            "MyProject\\src\\Main.pas",
+            "OtherProject\\Main.pas",
+        ]
+        assert _derive_project_prefix(root_file, index_paths) == "MyProject"
+
+    def test_empty_root_file(self):
+        assert _derive_project_prefix("", ["a/b.pas"]) == ""
+
+    def test_no_matching_paths(self):
+        root_file = "/mnt/storage/Proj/Unique.pas"
+        index_paths = ["Other\\Something.pas"]
+        assert _derive_project_prefix(root_file, index_paths) == ""
+
+    def test_single_component_path(self):
+        root_file = "/mnt/Unit1.pas"
+        index_paths = ["Unit1.pas"]
+        # No directory component → empty prefix
+        assert _derive_project_prefix(root_file, index_paths) == ""
+
+
+class TestPathMatchesPrefix:
+    """Verify project path matching."""
+
+    def test_matches_forward_slash(self):
+        assert _path_matches_prefix("011-MultiLevelList/src/Unit1.pas", "011-MultiLevelList")
+
+    def test_matches_backslash(self):
+        assert _path_matches_prefix("011-MultiLevelList\\src\\Unit1.pas", "011-MultiLevelList")
+
+    def test_case_insensitive(self):
+        assert _path_matches_prefix("011-multilevellist/src/Unit1.pas", "011-MultiLevelList")
+
+    def test_no_match(self):
+        assert not _path_matches_prefix("015-MVC-En-Delphi/Unit1.pas", "011-MultiLevelList")
+
+    def test_empty_prefix_always_matches(self):
+        assert _path_matches_prefix("anything/at/all.pas", "")
+
+
+# ─── Call graph builder proximity resolution ──────────────────────────
+
+
+class TestCallGraphBuilderProximity:
+    """Verify that callee resolution prefers same-project chunks."""
+
+    def _make_chunk(self, name: str, file_path: str) -> CodeChunk:
+        return CodeChunk(
+            chunk_id=f"{file_path}::::{name}",
+            file_path=file_path,
+            function_name=name,
+            class_name="",
+            language="delphi",
+            line_start=1,
+            line_end=10,
+            content=f"procedure {name}; begin end;",
+        )
+
+    def test_common_prefix_length_same_project(self):
+        assert _common_prefix_length(
+            "011-MultiLevelList/src/Unit1.pas",
+            "011-MultiLevelList/src/Unit3.pas",
+        ) == 2  # "011-MultiLevelList" + "src"
+
+    def test_common_prefix_length_diff_project(self):
+        assert _common_prefix_length(
+            "011-MultiLevelList/src/Unit1.pas",
+            "015-MVC-En-Delphi/Unit1.pas",
+        ) == 0
+
+    def test_resolve_callee_prefers_same_project(self):
+        chunk_011 = self._make_chunk("Button1Click", "011-MultiLevelList/src/Unit1.pas")
+        chunk_015 = self._make_chunk("Button1Click", "015-MVC-En-Delphi/Unit1.pas")
+        func_map = {"BUTTON1CLICK": [chunk_011, chunk_015]}
+
+        result = _resolve_callee("Button1Click", func_map, "011-MultiLevelList/src/fMain.pas")
+        assert result is chunk_011
+
+    def test_resolve_callee_single_candidate(self):
+        chunk = self._make_chunk("UniqueFunc", "proj/src/Utils.pas")
+        func_map = {"UNIQUEFUNC": [chunk]}
+
+        result = _resolve_callee("UniqueFunc", func_map, "other/caller.pas")
+        assert result is chunk
+
+    def test_resolve_callee_not_found(self):
+        result = _resolve_callee("NonExistent", {}, "any/path.pas")
+        assert result is None
+
+
+# ─── DFM file parsing ────────────────────────────────────────────────
+
+
+class TestDfmFileParsing:
+    """Verify .dfm form file parsing extracts forms and event handlers."""
+
+    def test_basic_form_with_events(self):
+        from trustbot.indexing.chunker import _parse_dfm_file
+
+        dfm = (
+            "object Form1: TForm1\n"
+            "  OnCreate = FormCreate\n"
+            "  object Button1: TButton\n"
+            "    OnClick = Button1Click\n"
+            "  end\n"
+            "  object Button2: TButton\n"
+            "    OnClick = Button2Click\n"
+            "  end\n"
+            "end\n"
+        )
+        chunks = _parse_dfm_file(dfm, "011/src/Unit1.dfm")
+        assert len(chunks) == 1
+        c = chunks[0]
+        assert c.function_name == "Form1"
+        assert c.class_name == "TForm1"
+        assert c.metadata["is_dfm_form"] is True
+        handlers = c.metadata["event_handlers"]
+        assert "FormCreate" in handlers
+        assert "Button1Click" in handlers
+        assert "Button2Click" in handlers
+
+    def test_nested_objects(self):
+        from trustbot.indexing.chunker import _parse_dfm_file
+
+        dfm = (
+            "object MainForm: TMainForm\n"
+            "  object Panel1: TPanel\n"
+            "    object SubBtn: TButton\n"
+            "      OnClick = SubBtnClick\n"
+            "    end\n"
+            "  end\n"
+            "end\n"
+        )
+        chunks = _parse_dfm_file(dfm, "proj/Main.dfm")
+        assert len(chunks) == 1
+        assert "SubBtnClick" in chunks[0].metadata["event_handlers"]
+
+    def test_no_events(self):
+        from trustbot.indexing.chunker import _parse_dfm_file
+
+        dfm = (
+            "object Form1: TForm1\n"
+            "  Caption = 'Hello'\n"
+            "end\n"
+        )
+        chunks = _parse_dfm_file(dfm, "proj/Unit1.dfm")
+        assert len(chunks) == 1
+        assert chunks[0].metadata["event_handlers"] == []
+
+    def test_empty_dfm(self):
+        from trustbot.indexing.chunker import _parse_dfm_file
+
+        chunks = _parse_dfm_file("", "proj/Empty.dfm")
+        assert len(chunks) == 0
+
+
+# ─── DFM form-to-handler edges in call graph builder ─────────────────
+
+
+class TestDfmCallGraphEdges:
+    """Verify call graph builder creates edges from .dfm forms to handlers."""
+
+    def test_dfm_form_creates_edges_to_handlers(self):
+        from trustbot.indexing.chunker import CodeChunk
+        from trustbot.indexing.call_graph_builder import build_call_graph_from_chunks
+
+        form_chunk = CodeChunk(
+            file_path="proj/Unit1.dfm",
+            language="delphi",
+            function_name="Form1",
+            class_name="TForm1",
+            line_start=1, line_end=10,
+            content="object Form1: TForm1\n  OnClick = Button1Click\nend",
+            metadata={"event_handlers": ["Button1Click", "Button2Click"], "is_dfm_form": True},
+        )
+        handler1 = CodeChunk(
+            file_path="proj/Unit1.pas",
+            language="delphi",
+            function_name="Button1Click",
+            class_name="TForm1",
+            line_start=10, line_end=20,
+            content="procedure TForm1.Button1Click(Sender: TObject);\nbegin\nend;",
+        )
+        handler2 = CodeChunk(
+            file_path="proj/Unit1.pas",
+            language="delphi",
+            function_name="Button2Click",
+            class_name="TForm1",
+            line_start=22, line_end=30,
+            content="procedure TForm1.Button2Click(Sender: TObject);\nbegin\nend;",
+        )
+        edges = build_call_graph_from_chunks([form_chunk, handler1, handler2])
+        edge_pairs = [(e.from_chunk, e.to_chunk) for e in edges]
+
+        # Form1 should have edges to both handlers
+        assert any("Form1" in fc and "Button1Click" in tc for fc, tc in edge_pairs)
+        assert any("Form1" in fc and "Button2Click" in tc for fc, tc in edge_pairs)
+
+
+# ─── Execution order comparison ──────────────────────────────────────
+
+
+class TestExecutionOrderComparison:
+    """Verify that verification detects execution order mismatches."""
+
+    def test_matching_order(self):
+        neo = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.NEO4J,
+            root_function="Root",
+            edges=[
+                CallGraphEdge(caller="Root", callee="First", execution_order=1),
+                CallGraphEdge(caller="Root", callee="Second", execution_order=2),
+            ],
+        )
+        fs = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.FILESYSTEM,
+            root_function="Root",
+            edges=[
+                CallGraphEdge(caller="Root", callee="First", execution_order=1),
+                CallGraphEdge(caller="Root", callee="Second", execution_order=2),
+            ],
+        )
+        normalizer = NormalizationAgent()
+        verifier = VerificationAgent()
+        result = verifier.verify(normalizer.normalize(neo), normalizer.normalize(fs))
+        assert result.metadata["execution_order_matches"] >= 1
+        assert len(result.metadata["execution_order_mismatches"]) == 0
+
+    def test_mismatched_order(self):
+        neo = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.NEO4J,
+            root_function="Root",
+            edges=[
+                CallGraphEdge(caller="Root", callee="First", execution_order=1),
+                CallGraphEdge(caller="Root", callee="Second", execution_order=2),
+            ],
+        )
+        fs = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.FILESYSTEM,
+            root_function="Root",
+            edges=[
+                CallGraphEdge(caller="Root", callee="Second", execution_order=1),
+                CallGraphEdge(caller="Root", callee="First", execution_order=2),
+            ],
+        )
+        normalizer = NormalizationAgent()
+        verifier = VerificationAgent()
+        result = verifier.verify(normalizer.normalize(neo), normalizer.normalize(fs))
+        mismatches = result.metadata["execution_order_mismatches"]
+        assert len(mismatches) == 1
+        assert mismatches[0]["caller"] == "ROOT"

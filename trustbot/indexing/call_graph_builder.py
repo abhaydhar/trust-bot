@@ -54,6 +54,40 @@ CALL_PATTERNS = [
 ]
 
 
+def _common_prefix_length(path_a: str, path_b: str) -> int:
+    """Count shared leading path components between two file paths."""
+    a_parts = path_a.replace("\\", "/").upper().split("/")
+    b_parts = path_b.replace("\\", "/").upper().split("/")
+    common = 0
+    for pa, pb in zip(a_parts, b_parts):
+        if pa == pb:
+            common += 1
+        else:
+            break
+    return common
+
+
+def _resolve_callee(
+    callee_name: str,
+    func_to_chunks: dict[str, list[CodeChunk]],
+    caller_file: str,
+) -> CodeChunk | None:
+    """
+    Resolve a callee name to a CodeChunk, preferring chunks in the same
+    directory/project as the caller.  When multiple chunks share the same
+    function name across projects, pick the one with the longest common
+    path prefix with the caller.
+    """
+    candidates = func_to_chunks.get(callee_name.upper())
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    # Score by path proximity to caller
+    best = max(candidates, key=lambda c: _common_prefix_length(c.file_path, caller_file))
+    return best
+
+
 def build_call_graph_from_chunks(chunks: List[CodeChunk]) -> List[CallGraphEdge]:
     """
     Build a call graph from code chunks using two strategies:
@@ -68,12 +102,12 @@ def build_call_graph_from_chunks(chunks: List[CodeChunk]) -> List[CallGraphEdge]
     """
     edges = []
 
-    function_index: dict[str, CodeChunk] = {}
-    function_index_upper: dict[str, CodeChunk] = {}
+    # Map uppercase function name -> all chunks with that name (multi-project safe)
+    func_to_chunks: dict[str, list[CodeChunk]] = {}
     for chunk in chunks:
         if chunk.function_name and chunk.function_name != "<module>":
-            function_index[chunk.function_name] = chunk
-            function_index_upper[chunk.function_name.upper()] = chunk
+            key = chunk.function_name.upper()
+            func_to_chunks.setdefault(key, []).append(chunk)
 
     seen_edges: set[tuple[str, str]] = set()
 
@@ -97,40 +131,52 @@ def build_call_graph_from_chunks(chunks: List[CodeChunk]) -> List[CallGraphEdge]
                 callee_name = match.group("callee")
                 if callee_name.lower() in SKIP_TOKENS:
                     continue
-                callee_chunk = function_index.get(callee_name)
-                if not callee_chunk:
-                    callee_chunk = function_index_upper.get(callee_name.upper())
+                callee_chunk = _resolve_callee(callee_name, func_to_chunks, chunk.file_path)
                 if callee_chunk and callee_chunk.chunk_id != chunk.chunk_id:
                     _add_edge(chunk, callee_chunk, 0.75)
 
     # Strategy 2: bare identifier matching (Delphi parameterless calls).
-    # For each known function name, build a word-boundary regex and scan
-    # all chunks for occurrences. This catches `ChargeArborescence;` without ().
-    # Only applied to Delphi/Pascal files to avoid false positives.
     delphi_languages = {"delphi", "pascal"}
     delphi_chunks = [c for c in chunks if c.language in delphi_languages and c.content]
 
     if delphi_chunks:
         # Build patterns for all known function names (min 3 chars to avoid noise)
-        bare_patterns: dict[str, tuple[re.Pattern, CodeChunk]] = {}
-        for fname, fchunk in function_index.items():
+        bare_patterns: dict[str, re.Pattern] = {}
+        all_func_names: set[str] = set()
+        for key in func_to_chunks:
+            fname = func_to_chunks[key][0].function_name
             if len(fname) >= 3 and fname.lower() not in SKIP_TOKENS:
-                bare_patterns[fname] = (
-                    re.compile(r'\b' + re.escape(fname) + r'\b', re.IGNORECASE),
-                    fchunk,
+                bare_patterns[fname] = re.compile(
+                    r'\b' + re.escape(fname) + r'\b', re.IGNORECASE,
                 )
+                all_func_names.add(fname.upper())
 
         for chunk in delphi_chunks:
             if not chunk.function_name or chunk.function_name == "<module>":
                 continue
-            for fname, (pat, target_chunk) in bare_patterns.items():
-                if target_chunk.chunk_id == chunk.chunk_id:
-                    continue
+            for fname, pat in bare_patterns.items():
                 if pat.search(chunk.content):
-                    _add_edge(chunk, target_chunk, 0.65)
+                    target_chunk = _resolve_callee(fname, func_to_chunks, chunk.file_path)
+                    if target_chunk and target_chunk.chunk_id != chunk.chunk_id:
+                        _add_edge(chunk, target_chunk, 0.65)
+
+    # Strategy 3: .dfm form-to-handler edges.
+    # DFM chunks have metadata["event_handlers"] listing handler function names
+    # (e.g., Button1Click, FormCreate). Create edges from the form to each handler.
+    dfm_edge_count = 0
+    for chunk in chunks:
+        handlers = chunk.metadata.get("event_handlers", [])
+        if not handlers:
+            continue
+        for handler_name in handlers:
+            target = _resolve_callee(handler_name, func_to_chunks, chunk.file_path)
+            if target and target.chunk_id != chunk.chunk_id:
+                _add_edge(chunk, target, 0.90)
+                dfm_edge_count += 1
 
     logger.info(
-        "Built call graph: %d edges from %d chunks (%d Delphi chunks scanned for bare calls)",
-        len(edges), len(chunks), len(delphi_chunks),
+        "Built call graph: %d edges from %d chunks "
+        "(%d Delphi bare-call scans, %d DFM form-to-handler edges)",
+        len(edges), len(chunks), len(delphi_chunks), dfm_edge_count,
     )
     return edges

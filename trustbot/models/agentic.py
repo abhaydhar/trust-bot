@@ -48,6 +48,7 @@ class CallGraphEdge(BaseModel):
     caller_class: str = ""
     callee_class: str = ""
     depth: int = 1
+    execution_order: int = 0
     extraction_method: ExtractionMethod = ExtractionMethod.NEO4J
     confidence: float = 1.0
 

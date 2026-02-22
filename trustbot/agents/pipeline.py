@@ -86,6 +86,17 @@ class ValidationPipeline:
 
         # --- Agent 2: Build from indexed codebase ---
         root_class = neo4j_graph.metadata.get("root_class_name", "")
+
+        # Collect all unique file paths from Agent 1's edges as scope hints
+        neo4j_hint_files: set[str] = set()
+        for edge in neo4j_graph.edges:
+            if edge.caller_file:
+                neo4j_hint_files.add(edge.caller_file)
+            if edge.callee_file:
+                neo4j_hint_files.add(edge.callee_file)
+        if root_file:
+            neo4j_hint_files.add(root_file)
+
         if progress_callback:
             progress_callback("agent2", f"Building call graph from index (root: {root_function})...")
 
@@ -106,6 +117,7 @@ class ValidationPipeline:
                 execution_flow_id=execution_flow_key,
                 root_class=root_class,
                 root_file=root_file,
+                neo4j_hint_files=neo4j_hint_files,
             )
 
         logger.info(
