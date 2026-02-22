@@ -881,15 +881,23 @@ def create_ui():
                         accordion_classes
                     ) as exp:
                         exp.props["header-class"] = accordion_header_class
-                        with ui.element("div").classes(accordion_body_classes):
-                            mermaid_container = ui.column().classes("w-full gap-4")
+                        with ui.element("div").classes(accordion_body_classes).style(
+                            "width: 100%; box-sizing: border-box;"
+                        ):
+                            mermaid_container = ui.column().style(
+                                "width: 100%; gap: 1rem;"
+                            )
 
                     with ui.expansion(
                         "Call Tree Diagrams -- Interactive DAG", icon="hub"
                     ).classes(accordion_classes) as exp:
                         exp.props["header-class"] = accordion_header_class
-                        with ui.element("div").classes(accordion_body_classes):
-                            dag_container = ui.column().classes("w-full gap-4")
+                        with ui.element("div").classes(accordion_body_classes).style(
+                            "width: 100%; box-sizing: border-box;"
+                        ):
+                            dag_container = ui.column().style(
+                                "width: 100%; gap: 1rem;"
+                            )
 
                     with ui.expansion(
                         "Agent 1 Output (Neo4j Call Graph)", icon="storage"
@@ -1026,9 +1034,9 @@ def create_ui():
                             with ui.element("div").style(
                                 "display: grid; grid-template-columns: 1fr 1fr; "
                                 "gap: 1rem; width: 100%; overflow: hidden;"
-                            ):
+                            ).classes("w-full"):
                                 if neo_mm:
-                                    with ui.card().style(
+                                    with ui.card().classes("w-full").style(
                                         "min-width: 0; overflow: hidden;"
                                     ):
                                         ui.label(
@@ -1039,11 +1047,11 @@ def create_ui():
                                             "Mermaid script (Flow %s, Neo4j):\n%s",
                                             f_idx + 1, neo_mm,
                                         )
-                                        ui.mermaid(neo_mm).style(
-                                            "width: 100%; overflow: auto;"
+                                        ui.mermaid(neo_mm).classes("w-full").style(
+                                            "overflow: auto;"
                                         )
                                 if idx_mm:
-                                    with ui.card().style(
+                                    with ui.card().classes("w-full").style(
                                         "min-width: 0; overflow: hidden;"
                                     ):
                                         ui.label(
@@ -1054,8 +1062,8 @@ def create_ui():
                                             "Mermaid script (Flow %s, Index):\n%s",
                                             f_idx + 1, idx_mm,
                                         )
-                                        ui.mermaid(idx_mm).style(
-                                            "width: 100%; overflow: auto;"
+                                        ui.mermaid(idx_mm).classes("w-full").style(
+                                            "overflow: auto;"
                                         )
                             ui.separator()
 
@@ -1075,9 +1083,9 @@ def create_ui():
                             with ui.element("div").style(
                                 "display: grid; grid-template-columns: 1fr 1fr; "
                                 "gap: 1rem; width: 100%; overflow: hidden;"
-                            ):
+                            ).classes("w-full"):
                                 if neo_has:
-                                    with ui.card().style(
+                                    with ui.card().classes("w-full").style(
                                         "min-width: 0; overflow: hidden;"
                                     ):
                                         ui.label("Agent 1 -- Neo4j").classes(
@@ -1085,11 +1093,9 @@ def create_ui():
                                         )
                                         ui.echart(
                                             build_echart_dag(neo_g, "Neo4j")
-                                        ).style(
-                                            "width: 100%; height: 500px;"
-                                        )
+                                        ).classes("w-full").style("height: 500px;")
                                 if idx_has:
-                                    with ui.card().style(
+                                    with ui.card().classes("w-full").style(
                                         "min-width: 0; overflow: hidden;"
                                     ):
                                         ui.label("Agent 2 -- Index").classes(
@@ -1097,9 +1103,7 @@ def create_ui():
                                         )
                                         ui.echart(
                                             build_echart_dag(idx_g, "Index")
-                                        ).style(
-                                            "width: 100%; height: 500px;"
-                                        )
+                                        ).classes("w-full").style("height: 500px;")
                             ui.separator()
 
                     # Persist state for restore after reconnect/lock (Option A + B)
