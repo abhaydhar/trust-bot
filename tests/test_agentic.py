@@ -28,6 +28,7 @@ from trustbot.agents.agent2_index import (
     _extract_func_name,
     _derive_project_prefix,
     _path_matches_prefix,
+    _to_bare_name as agent2_to_bare_name,
 )
 from trustbot.indexing.call_graph_builder import _common_prefix_length, _resolve_callee
 from trustbot.indexing.chunker import CodeChunk
@@ -101,6 +102,25 @@ class TestChunkIdParsing:
     def test_extract_func_name_bare(self):
         name = _extract_func_name("ProcessPayment")
         assert name == "ProcessPayment"
+
+
+class TestAgent2BareNameResolution:
+    """Verify Agent 2 bare-name stripping for qualified Neo4j root names."""
+
+    def test_bare_from_qualified(self):
+        assert agent2_to_bare_name("TForm1.Button2Click") == "Button2Click"
+
+    def test_bare_from_bare(self):
+        assert agent2_to_bare_name("Button2Click") == "Button2Click"
+
+    def test_bare_empty(self):
+        assert agent2_to_bare_name("") == ""
+
+    def test_bare_dotted_multi(self):
+        assert agent2_to_bare_name("Namespace.Class.Method") == "Method"
+
+    def test_bare_preserves_case(self):
+        assert agent2_to_bare_name("TForm1.InitialiseEcran") == "InitialiseEcran"
 
 
 # ─── to_comparable_edges ─────────────────────────────────────────────
@@ -362,6 +382,68 @@ class TestVerificationAgentTierMatching:
         assert result.confirmed_edges[0].caller == "TFORM1.BUTTON2CLICK"
         assert result.confirmed_edges[0].callee == "INITIALISEECRAN"
         assert "bare name" in result.confirmed_edges[0].details.lower()
+        assert len(result.phantom_edges) == 0
+        assert len(result.missing_edges) == 0
+
+    def test_bare_name_file_match_qualified_neo4j(self):
+        """Bare name + file tier: Neo4j qualified names match index bare names when files match."""
+        neo = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.NEO4J,
+            root_function="Root",
+            edges=[
+                self._neo4j_edge(
+                    "TForm1.Button2Click", "TForm1.InitialiseEcran",
+                    caller_file=r"C:\src\Unit1.pas", callee_file=r"C:\src\Unit1.pas",
+                ),
+            ],
+        )
+        fs = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.FILESYSTEM,
+            root_function="Button2Click",
+            edges=[
+                self._index_edge(
+                    "Button2Click", "InitialiseEcran",
+                    caller_file="src/Unit1.pas", callee_file="src/Unit1.pas",
+                ),
+            ],
+        )
+        normalizer = NormalizationAgent()
+        verifier = VerificationAgent()
+        result = verifier.verify(normalizer.normalize(neo), normalizer.normalize(fs))
+
+        assert len(result.confirmed_edges) == 1
+        assert "bare name" in result.confirmed_edges[0].details.lower()
+        assert "file" in result.confirmed_edges[0].details.lower()
+        assert len(result.phantom_edges) == 0
+        assert len(result.missing_edges) == 0
+
+    def test_multiple_qualified_edges_all_match_bare(self):
+        """Multiple Neo4j edges with qualified names all match bare index edges."""
+        neo = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.NEO4J,
+            root_function="TForm1",
+            edges=[
+                self._neo4j_edge("TForm1.Button2Click", "InitialiseEcran"),
+                self._neo4j_edge("TForm1.FormCreate", "LoadData"),
+            ],
+        )
+        fs = CallGraphOutput(
+            execution_flow_id="EF-001",
+            source=GraphSource.FILESYSTEM,
+            root_function="Button2Click",
+            edges=[
+                self._index_edge("Button2Click", "InitialiseEcran"),
+                self._index_edge("FormCreate", "LoadData"),
+            ],
+        )
+        normalizer = NormalizationAgent()
+        verifier = VerificationAgent()
+        result = verifier.verify(normalizer.normalize(neo), normalizer.normalize(fs))
+
+        assert len(result.confirmed_edges) == 2
         assert len(result.phantom_edges) == 0
         assert len(result.missing_edges) == 0
 

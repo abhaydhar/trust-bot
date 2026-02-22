@@ -29,6 +29,11 @@ dependencies = [
     # Call tree visualization
     "networkx>=3.0",
     "matplotlib>=3.8.0",
+    # LangChain agentic framework
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langchain-litellm>=0.5.0",
 ]
 
 [project.optional-dependencies]

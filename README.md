@@ -64,6 +64,17 @@ python -m trustbot.main
 
 The web UI launches at `http://localhost:7860` (or the port set in `SERVER_PORT`).
 
+### State persistence (session restore)
+
+To keep validation state across browser reconnect or laptop lock/sleep, set in `.env`:
+
+- **`TRUSTBOT_STORAGE_SECRET`** — any non-empty secret (e.g. a random string). Enables NiceGUI session storage so Project ID, Run ID, and last validation report are persisted per browser session.
+- **`TRUSTBOT_SESSION_MAX_AGE_DAYS`** — optional; default `7`. Session cookie lifetime in days.
+
+Without `TRUSTBOT_STORAGE_SECRET`, the app runs as before but state is lost on reload or lock.
+
+**Manual test for state restore:** Run the app with `TRUSTBOT_STORAGE_SECRET` set, open the Validate tab, enter Project ID and Run ID, click Validate. Lock the laptop (or close the tab and reopen the same URL). Unlock (or reload). The inputs and the last validation report should still be visible.
+
 ### Run Tests
 
 ```bash

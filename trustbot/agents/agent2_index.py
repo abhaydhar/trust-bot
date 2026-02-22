@@ -50,6 +50,18 @@ def _extract_func_name(chunk_id: str) -> str:
     return func_name or chunk_id.strip()
 
 
+def _to_bare_name(name: str) -> str:
+    """
+    Strip a leading 'ClassName.' qualifier so that Neo4j qualified names
+    (e.g. 'TForm1.Button2Click') resolve to bare names ('Button2Click')
+    that match the index.
+    """
+    s = (name or "").strip()
+    if "." in s:
+        return s.rsplit(".", 1)[-1].strip()
+    return s
+
+
 def _derive_project_prefix(
     root_file: str,
     index_file_paths: list[str],
@@ -180,7 +192,7 @@ class Agent2IndexBuilder:
                 continue
 
             key = caller_name.upper().strip()
-            edge_map.setdefault(key, []).append({
+            edge_entry = {
                 "caller_name": caller_name,
                 "callee_name": callee_name,
                 "caller_file": caller_file,
@@ -190,7 +202,14 @@ class Agent2IndexBuilder:
                 "caller_raw": raw_caller,
                 "callee_raw": raw_callee,
                 "confidence": e.get("confidence", 0.8),
-            })
+            }
+            edge_map.setdefault(key, []).append(edge_entry)
+            # Also register under "Class.Method" so traversal from a qualified
+            # Neo4j root (e.g. TForm1.Button2Click) can find outgoing edges
+            if caller_class:
+                qualified_key = f"{caller_class.upper().strip()}.{key}"
+                if qualified_key != key:
+                    edge_map.setdefault(qualified_key, []).append(edge_entry)
 
         if skipped_cross_project:
             logger.info(
@@ -199,7 +218,9 @@ class Agent2IndexBuilder:
                 sum(len(v) for v in edge_map.values()),
             )
 
-        # Build function lookups scoped to the same project
+        # Build function lookups scoped to the same project.
+        # We index by BOTH bare name and "Class.Method" qualified name so that
+        # lookups from Neo4j (which may use either form) succeed.
         func_to_file: dict[str, str] = {}
         func_to_class: dict[str, str] = {}
         for fn, fp, cn in all_functions:
@@ -208,13 +229,36 @@ class Agent2IndexBuilder:
             key = fn.upper().strip()
             func_to_file[key] = fp
             func_to_class[key] = cn or ""
+            # Also register under "CLASS.FUNC" so lookups from Neo4j work
+            if cn:
+                qualified_key = f"{cn.upper().strip()}.{key}"
+                if qualified_key not in func_to_file:
+                    func_to_file[qualified_key] = fp
+                    func_to_class[qualified_key] = cn
 
-        # Resolve the effective root: try original name, then class fallback
+        # Resolve the effective root: try original name, then bare name,
+        # then class fallback.  Neo4j may send a qualified root like
+        # "TForm1.Button2Click" while the index has bare "Button2Click".
         original_root = root_function
         root_key = root_function.upper().strip()
         root_in_index = root_key in func_to_file
         root_in_edge_map = root_key in edge_map
         resolved_via = "original"
+
+        # Try stripping a ClassName. prefix if the qualified form isn't found
+        if not root_in_index and not root_in_edge_map:
+            bare_root = _to_bare_name(root_function)
+            bare_key = bare_root.upper().strip()
+            if bare_key != root_key and (bare_key in func_to_file or bare_key in edge_map):
+                logger.info(
+                    "Root '%s' not in index; bare name '%s' found — using bare root",
+                    root_function, bare_root,
+                )
+                root_function = bare_root
+                root_key = bare_key
+                root_in_index = root_key in func_to_file
+                root_in_edge_map = root_key in edge_map
+                resolved_via = f"bare_name ({original_root} → {bare_root})"
 
         if not root_in_index and not root_in_edge_map and root_class:
             class_key = root_class.upper().strip()

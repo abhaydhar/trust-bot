@@ -8,7 +8,7 @@ import logging
 import threading
 from pathlib import Path
 
-from nicegui import ui
+from nicegui import app, ui
 
 from trustbot.config import settings
 from trustbot.models.agentic import VerificationResult
@@ -203,25 +203,58 @@ async def _validate_all_flows(project_id: int, run_id: int):
         total_flows = len(flows)
         _set_progress(0.10, f"Found {total_flows} flows to validate...")
 
-        all_results: list[dict] = []
-        for idx, flow in enumerate(flows):
-            base_pct = 0.10 + 0.80 * (idx / total_flows)
-            step_width = 0.80 / total_flows
-            flow_name = flow.name or flow.key
+        flow_name_map = {f.key: (f.name or f.key) for f in flows}
+        flow_keys = [f.key for f in flows]
+        _completed = {"count": 0}
+        _active_flows: dict[int, str] = {}
 
-            def _agent_progress(agent, msg, _bp=base_pct, _sw=step_width):
-                offsets = {"agent1": 0.0, "agent2": 0.33, "agent3": 0.66}
-                labels = {"agent1": "Agent 1", "agent2": "Agent 2", "agent3": "Agent 3"}
-                pct = _bp + _sw * offsets.get(agent, 0.0)
-                label = labels.get(agent, agent)
-                _set_progress(pct, f"Flow {idx+1}/{total_flows} -- {label}: {msg}")
-
-            result, report_md, neo4j_g, index_g = await _pipeline.validate_flow(
-                flow.key, progress_callback=_agent_progress,
+        def _parallel_progress(idx, total, agent, msg):
+            labels = {"agent1": "Agent 1", "agent2": "Agent 2", "agent3": "Agent 3"}
+            label = labels.get(agent, agent)
+            flow_name = flow_name_map.get(
+                flow_keys[idx] if idx < len(flow_keys) else "", f"Flow {idx+1}"
             )
+
+            if agent == "done":
+                _completed["count"] += 1
+                _active_flows.pop(idx, None)
+                done = _completed["count"]
+                pct = 0.10 + 0.80 * (done / total)
+                _set_progress(pct, f"Completed {done}/{total} flows")
+                return
+
+            _active_flows[idx] = f"{flow_name}: {label}"
+            done = _completed["count"]
+            pct = 0.10 + 0.80 * (done / total)
+            active_summary = ", ".join(
+                sorted(_active_flows.values())[:3]
+            )
+            if len(_active_flows) > 3:
+                active_summary += f" (+{len(_active_flows) - 3} more)"
+            _set_progress(
+                pct,
+                f"Done {done}/{total} | Active: {active_summary}"
+            )
+
+        if hasattr(_pipeline, "validate_flows"):
+            raw_results = await _pipeline.validate_flows(
+                flow_keys,
+                progress_callback=_parallel_progress,
+            )
+        else:
+            raw_results = []
+            for idx, key in enumerate(flow_keys):
+                def _seq_progress(agent, msg, _idx=idx):
+                    _parallel_progress(_idx, total_flows, agent, msg)
+                r = await _pipeline.validate_flow(key, progress_callback=_seq_progress)
+                raw_results.append(r)
+                _parallel_progress(idx, total_flows, "done", "")
+
+        all_results: list[dict] = []
+        for key, (result, report_md, neo4j_g, index_g) in zip(flow_keys, raw_results):
             all_results.append({
-                "flow_key": flow.key,
-                "flow_name": flow_name,
+                "flow_key": key,
+                "flow_name": flow_name_map.get(key, key),
                 "result": result,
                 "report_md": report_md,
                 "neo4j_edges": len(neo4j_g.edges),
@@ -673,7 +706,7 @@ def create_ui():
 
         registry = _get_registry()
         from trustbot.agent.orchestrator import AgentOrchestrator
-        from trustbot.agents.pipeline import ValidationPipeline
+        from trustbot.agents.pipeline import create_pipeline
         from trustbot.index.code_index import CodeIndex
 
         _orchestrator = AgentOrchestrator(registry)
@@ -687,15 +720,26 @@ def create_ui():
                 logger.warning("Could not auto-load git index: %s", e)
 
         try:
-            _pipeline = ValidationPipeline(
+            fs_tool = registry.get("filesystem") if registry else None
+        except (KeyError, Exception):
+            fs_tool = None
+
+        try:
+            _pipeline = create_pipeline(
                 neo4j_tool=registry.get("neo4j"),
                 code_index=_git_index,
+                filesystem_tool=fs_tool,
             )
         except KeyError:
             logger.warning("ValidationPipeline not available (missing neo4j tool)")
 
         # ── Page header ───────────────────────────────────────────────
-        ui.markdown("# TrustBot\n*3-Agent call graph validation: Neo4j vs Indexed Codebase*")
+        _mode_label = "LLM Agentic" if settings.agentic_mode == "llm" else "Rule-Based"
+        ui.markdown(
+            f"# TrustBot\n"
+            f"*3-Agent call graph validation: Neo4j vs Indexed Codebase*\n\n"
+            f"**Mode:** {_mode_label} (`TRUSTBOT_AGENTIC_MODE={settings.agentic_mode}`)"
+        )
 
         with ui.tabs().classes("w-full") as tabs:
             tab_indexer = ui.tab("1. Code Indexer")
@@ -868,6 +912,34 @@ def create_ui():
                         with ui.element("div").classes(accordion_body_classes):
                             json_editor = ui.code("", language="json").classes("w-full")
 
+                # Restore persisted state after reconnect/lock (Option A + B)
+                if settings.storage_secret:
+                    try:
+                        user = app.storage.user
+                        pid = user.get("last_project_id")
+                        rid = user.get("last_run_id")
+                        if pid is not None and rid is not None:
+                            project_id_input.value = str(pid)
+                            run_id_input.value = str(rid)
+                        summary = user.get("last_summary")
+                        if summary:
+                            summary_md.set_content(summary)
+                            report_section.set_visibility(True)
+                        report = user.get("last_report")
+                        if report:
+                            report_md.set_content(report)
+                        agent1 = user.get("last_agent1_output")
+                        if agent1:
+                            agent1_md.set_content(agent1)
+                        agent2 = user.get("last_agent2_output")
+                        if agent2:
+                            agent2_md.set_content(agent2)
+                        raw_json_str = user.get("last_raw_json")
+                        if raw_json_str:
+                            json_editor.set_content(raw_json_str)
+                    except RuntimeError as e:
+                        logger.debug("Could not restore validation state: %s", e)
+
                 async def _on_validate_click():
                     p_str = (project_id_input.value or "").strip()
                     r_str = (run_id_input.value or "").strip()
@@ -951,9 +1023,14 @@ def create_ui():
                                 f"Flow {f_idx+1}: {r['flow_name']}  "
                                 f"({trust:.0%} trust)"
                             ).classes(f"text-lg font-bold text-{trust_color}-700")
-                            with ui.row().classes("w-full gap-4"):
+                            with ui.element("div").style(
+                                "display: grid; grid-template-columns: 1fr 1fr; "
+                                "gap: 1rem; width: 100%; overflow: hidden;"
+                            ):
                                 if neo_mm:
-                                    with ui.card().classes("flex-1"):
+                                    with ui.card().style(
+                                        "min-width: 0; overflow: hidden;"
+                                    ):
                                         ui.label(
                                             f"Agent 1 -- Neo4j "
                                             f"({len(neo_g.edges)} edges)"
@@ -962,9 +1039,13 @@ def create_ui():
                                             "Mermaid script (Flow %s, Neo4j):\n%s",
                                             f_idx + 1, neo_mm,
                                         )
-                                        ui.mermaid(neo_mm)
+                                        ui.mermaid(neo_mm).style(
+                                            "width: 100%; overflow: auto;"
+                                        )
                                 if idx_mm:
-                                    with ui.card().classes("flex-1"):
+                                    with ui.card().style(
+                                        "min-width: 0; overflow: hidden;"
+                                    ):
                                         ui.label(
                                             f"Agent 2 -- Index "
                                             f"({len(idx_g.edges)} edges)"
@@ -973,7 +1054,9 @@ def create_ui():
                                             "Mermaid script (Flow %s, Index):\n%s",
                                             f_idx + 1, idx_mm,
                                         )
-                                        ui.mermaid(idx_mm)
+                                        ui.mermaid(idx_mm).style(
+                                            "width: 100%; overflow: auto;"
+                                        )
                             ui.separator()
 
                     # Build ECharts DAG (interactive)
@@ -989,24 +1072,57 @@ def create_ui():
                             ui.label(
                                 f"Flow {f_idx+1}: {r['flow_name']}"
                             ).classes("text-lg font-bold")
-                            with ui.row().classes("w-full gap-4"):
+                            with ui.element("div").style(
+                                "display: grid; grid-template-columns: 1fr 1fr; "
+                                "gap: 1rem; width: 100%; overflow: hidden;"
+                            ):
                                 if neo_has:
-                                    with ui.card().classes("flex-1"):
+                                    with ui.card().style(
+                                        "min-width: 0; overflow: hidden;"
+                                    ):
                                         ui.label("Agent 1 -- Neo4j").classes(
                                             "text-orange-600 font-bold"
                                         )
                                         ui.echart(
                                             build_echart_dag(neo_g, "Neo4j")
-                                        ).classes("w-full h-96")
+                                        ).style(
+                                            "width: 100%; height: 500px;"
+                                        )
                                 if idx_has:
-                                    with ui.card().classes("flex-1"):
+                                    with ui.card().style(
+                                        "min-width: 0; overflow: hidden;"
+                                    ):
                                         ui.label("Agent 2 -- Index").classes(
                                             "text-purple-600 font-bold"
                                         )
                                         ui.echart(
                                             build_echart_dag(idx_g, "Index")
-                                        ).classes("w-full h-96")
+                                        ).style(
+                                            "width: 100%; height: 500px;"
+                                        )
                             ui.separator()
+
+                    # Persist state for restore after reconnect/lock (Option A + B)
+                    if settings.storage_secret:
+                        try:
+                            user = app.storage.user
+                            user["last_project_id"] = project_id
+                            user["last_run_id"] = run_id
+                            user["last_summary"] = _format_3agent_summary(
+                                project_id, run_id, all_results
+                            )
+                            user["last_report"] = _format_3agent_report(
+                                project_id, run_id, all_results
+                            )
+                            user["last_agent1_output"] = _format_agent_output(
+                                "Agent 1 (Neo4j)", all_results, "neo4j_graph"
+                            )
+                            user["last_agent2_output"] = _format_agent_output(
+                                "Agent 2 (Index)", all_results, "index_graph"
+                            )
+                            user["last_raw_json"] = raw_json
+                        except RuntimeError as e:
+                            logger.debug("Could not persist validation state: %s", e)
 
                     validate_btn.enable()
 

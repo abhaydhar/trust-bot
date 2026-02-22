@@ -122,6 +122,14 @@ def main() -> None:
     """Main entry point -- start TrustBot."""
     create_ui()
     port = settings.server_port
+    if not settings.storage_secret:
+        logger.warning(
+            "TRUSTBOT_STORAGE_SECRET not set; session state will not persist across reconnect/lock. "
+            "Set it in .env to enable state restore."
+        )
+    session_kwargs: dict | None = None
+    if settings.storage_secret and settings.session_max_age_days > 0:
+        session_kwargs = {"max_age": settings.session_max_age_days * 24 * 3600}
     logger.info("Launching NiceGUI on http://localhost:%d ...", port)
     ui.run(
         host="127.0.0.1",
@@ -129,6 +137,8 @@ def main() -> None:
         title="TrustBot",
         reload=False,
         show=False,
+        storage_secret=settings.storage_secret or None,
+        session_middleware_kwargs=session_kwargs,
     )
 
 

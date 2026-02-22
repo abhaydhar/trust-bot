@@ -1,6 +1,16 @@
 """
 Multi-agent validation pipeline (3-agent architecture).
 
+Supports two modes controlled by TRUSTBOT_AGENTIC_MODE:
+
+  "llm"   — LangChain-based agents use LLM reasoning for every decision.
+             Each agent autonomously fetches data, resolves ambiguities,
+             and falls back to rules on LLM failure.
+
+  "rules" — Original rule-based pipeline with hardcoded matching tiers,
+             fixed trust score weights, and template-based reports.
+             Faster, deterministic, zero LLM cost.
+
 Agent 1 — Neo4j Graph Fetcher:
     Fetches the call graph from Neo4j for an execution flow.
     Identifies the ROOT Snippet (type='ROOT', STARTS_FLOW=true).
@@ -16,13 +26,10 @@ Agent 3 — Comparison & Verification:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
-from trustbot.agents.agent1_neo4j import Agent1Neo4jFetcher
-from trustbot.agents.agent2_index import Agent2IndexBuilder
-from trustbot.agents.normalization import NormalizationAgent
-from trustbot.agents.report import ReportAgent
-from trustbot.agents.verification import VerificationAgent
+from trustbot.config import settings
 from trustbot.index.code_index import CodeIndex
 from trustbot.models.agentic import CallGraphOutput, VerificationResult
 from trustbot.tools.neo4j_tool import Neo4jTool
@@ -30,9 +37,55 @@ from trustbot.tools.neo4j_tool import Neo4jTool
 logger = logging.getLogger("trustbot.agents.pipeline")
 
 
+def create_pipeline(
+    neo4j_tool: Neo4jTool,
+    code_index: CodeIndex | None = None,
+    filesystem_tool=None,
+    mode: str | None = None,
+) -> "ValidationPipeline | AgenticPipeline":
+    """
+    Factory: create the appropriate pipeline based on config or explicit mode.
+
+    Args:
+        neo4j_tool: Initialized Neo4j tool instance.
+        code_index: Optional CodeIndex (SQLite) for codebase lookups.
+        filesystem_tool: Optional FilesystemTool for reading source files.
+        mode: Override the config-level mode ("llm" or "rules").
+
+    Returns:
+        An AgenticPipeline (LLM-driven) or ValidationPipeline (rule-based).
+    """
+    effective_mode = (mode or settings.agentic_mode).lower().strip()
+
+    if effective_mode == "llm":
+        try:
+            from trustbot.agents.llm.orchestrator import AgenticPipeline
+
+            pipeline = AgenticPipeline(
+                neo4j_tool=neo4j_tool,
+                code_index=code_index,
+                filesystem_tool=filesystem_tool,
+            )
+            logger.info("Created LLM-driven AgenticPipeline (LangChain)")
+            return pipeline
+        except Exception as e:
+            logger.warning(
+                "Failed to create AgenticPipeline, falling back to rules: %s",
+                str(e)[:200],
+            )
+            effective_mode = "rules"
+
+    logger.info("Created rule-based ValidationPipeline")
+    return ValidationPipeline(
+        neo4j_tool=neo4j_tool,
+        code_index=code_index,
+        filesystem_tool=filesystem_tool,
+    )
+
+
 class ValidationPipeline:
     """
-    Full per-flow validation pipeline (3 agents):
+    Rule-based per-flow validation pipeline (3 agents):
 
     1. Agent 1 fetches call graph + ROOT snippet from Neo4j
     2. Agent 2 builds call graph from indexed codebase starting at ROOT
@@ -43,9 +96,13 @@ class ValidationPipeline:
         self,
         neo4j_tool: Neo4jTool,
         code_index: CodeIndex | None = None,
-        # Legacy parameters kept for backward compatibility
         filesystem_tool=None,
     ) -> None:
+        from trustbot.agents.agent1_neo4j import Agent1Neo4jFetcher
+        from trustbot.agents.normalization import NormalizationAgent
+        from trustbot.agents.report import ReportAgent
+        from trustbot.agents.verification import VerificationAgent
+
         self._neo4j_tool = neo4j_tool
         self._agent1 = Agent1Neo4jFetcher(neo4j_tool)
         self._code_index = code_index
@@ -72,6 +129,8 @@ class ValidationPipeline:
         Returns:
             (VerificationResult, markdown_report, neo4j_graph, index_graph)
         """
+        from trustbot.agents.agent2_index import Agent2IndexBuilder
+
         # --- Agent 1: Fetch from Neo4j ---
         if progress_callback:
             progress_callback("agent1", "Fetching call graph from Neo4j...")
@@ -87,7 +146,6 @@ class ValidationPipeline:
         # --- Agent 2: Build from indexed codebase ---
         root_class = neo4j_graph.metadata.get("root_class_name", "")
 
-        # Collect all unique file paths from Agent 1's edges as scope hints
         neo4j_hint_files: set[str] = set()
         for edge in neo4j_graph.edges:
             if edge.caller_file:
@@ -145,7 +203,54 @@ class ValidationPipeline:
 
         return result, report_md, neo4j_graph, index_graph
 
-    # Backward-compatible alias
+    async def validate_flows(
+        self,
+        flow_keys: list[str],
+        max_concurrent: int | None = None,
+        progress_callback=None,
+    ) -> list[tuple[VerificationResult, str, CallGraphOutput, CallGraphOutput]]:
+        """
+        Validate multiple flows concurrently (rule-based pipeline).
+
+        Rule-based agents are fast and mostly I/O-bound (Neo4j queries),
+        so higher concurrency is safe.
+        """
+        concurrency = max_concurrent or min(settings.max_concurrent_llm_calls, 10)
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def _validate_one(idx: int, key: str):
+            async with semaphore:
+                def _flow_progress(agent, msg):
+                    if progress_callback:
+                        progress_callback(idx, len(flow_keys), agent, msg)
+                try:
+                    result = await self.validate_flow(key, progress_callback=_flow_progress)
+                    if progress_callback:
+                        progress_callback(idx, len(flow_keys), "done", "")
+                    return result
+                except Exception as e:
+                    logger.exception("Flow %s failed: %s", key, e)
+                    if progress_callback:
+                        progress_callback(idx, len(flow_keys), "done", "")
+                    empty_graph = CallGraphOutput(
+                        execution_flow_id=key,
+                        source="filesystem",
+                        root_function="error",
+                        edges=[],
+                        unresolved_callees=[],
+                        metadata={"error": str(e)},
+                    )
+                    error_result = VerificationResult(
+                        execution_flow_id=key,
+                        graph_trust_score=0.0,
+                        flow_trust_score=0.0,
+                        metadata={"error": str(e)},
+                    )
+                    return error_result, f"Error: {e}", empty_graph, empty_graph
+
+        tasks = [_validate_one(i, key) for i, key in enumerate(flow_keys)]
+        return await asyncio.gather(*tasks)
+
     async def validate(
         self,
         execution_flow_id: str,

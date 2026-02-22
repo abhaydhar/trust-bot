@@ -71,8 +71,13 @@ class VerificationAgent:
         def _name_file_key(t):
             return (t[0], t[2], t[3], t[5])
 
+        def _bare_name_file_key(t):
+            return (_to_bare_name(t[0]), t[2], _to_bare_name(t[3]), t[5])
+
         neo_name_file = {_name_file_key(e) for e in neo_full}
         fs_name_file = {_name_file_key(e) for e in fs_full}
+        # Bare-name+file sets: strip ClassName. so TForm1.Button2Click ↔ Button2Click
+        fs_name_file_bare = {_bare_name_file_key(e) for e in fs_full}
 
         confirmed: list[VerifiedEdge] = []
         phantom: list[VerifiedEdge] = []
@@ -108,13 +113,22 @@ class VerificationAgent:
                 )
                 matched_neo_full.add(edge_key)
 
-        # Pass 2: name+file match for remaining unmatched edges
+        # Pass 2: name+file match for remaining unmatched edges.
+        # Also tries bare-name+file so "TForm1.Button2Click" matches "Button2Click"
+        # when both reference the same file.
         unmatched_neo_nf = {_name_file_key(e) for e in neo_full if e not in matched_neo_full}
         for nf_key in unmatched_neo_nf:
-            if nf_key in fs_name_file:
+            bare_nf = (_to_bare_name(nf_key[0]), nf_key[1], _to_bare_name(nf_key[2]), nf_key[3])
+            exact = nf_key in fs_name_file
+            bare = bare_nf in fs_name_file_bare
+            if exact or bare:
                 name_key = (nf_key[0], nf_key[2])
                 method = neo_edge_method.get(name_key, ExtractionMethod.NEO4J)
                 score = self._edge_trust(method, EdgeClassification.CONFIRMED) * 0.95
+                details = "Matched on name + file (class mismatch or missing)"
+                if bare and not exact:
+                    details = "Matched on bare name + file (qualified → bare name)"
+                    score *= 0.98
                 confirmed.append(
                     VerifiedEdge(
                         caller=nf_key[0],
@@ -123,7 +137,7 @@ class VerificationAgent:
                         callee_file=nf_key[3],
                         classification=EdgeClassification.CONFIRMED,
                         trust_score=score,
-                        details="Matched on name + file (class mismatch or missing)",
+                        details=details,
                     )
                 )
                 matched_neo_name_file.add(nf_key)
@@ -270,9 +284,13 @@ class VerificationAgent:
         matches = 0
         mismatches: list[dict] = []
         for caller, neo_callees in neo_order.items():
-            if caller not in fs_order:
+            # Try exact caller, then bare caller (Class.Method → Method)
+            fs_callees = fs_order.get(caller)
+            if fs_callees is None:
+                bare_caller = _to_bare_name(caller)
+                fs_callees = fs_order.get(bare_caller)
+            if fs_callees is None:
                 continue
-            fs_callees = fs_order[caller]
             # Only compare callees that exist in both lists
             common = [c for c in neo_callees if c in fs_callees]
             if len(common) < 2:
