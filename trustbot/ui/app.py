@@ -25,6 +25,11 @@ def _get_registry():
     return get_registry()
 
 
+async def _get_registry_async():
+    from trustbot.main import wait_for_registry
+    return await wait_for_registry()
+
+
 def _short_chunk_id(chunk_id: str) -> str:
     """Convert 'path/file.pas::ClassName::FuncName' to 'FuncName (file.pas)'."""
     parts = chunk_id.split("::")
@@ -993,7 +998,7 @@ def create_ui():
     async def index_page():
         global _pipeline, _orchestrator, _git_index
 
-        registry = _get_registry()
+        registry = await _get_registry_async()
         from trustbot.agent.orchestrator import AgentOrchestrator
         from trustbot.agents.pipeline import create_pipeline
         from trustbot.index.code_index import CodeIndex
@@ -1633,12 +1638,13 @@ def create_ui():
                     ).classes("flex-grow")
 
                 db_source_radio = ui.radio(
-                    ["PostgreSQL Connection", "Flat File Upload"],
-                    value="PostgreSQL Connection",
+                    ["Flat File Upload" , "PostgreSQL Connection" ],
+                    value="Flat File Upload",
                 ).props("inline")
 
                 # -- PostgreSQL credential card --
                 pg_card = ui.card().classes("w-full q-pa-md")
+                pg_card.set_visibility(False)
                 with pg_card:
                     with ui.row().classes("w-full gap-4"):
                         pg_host_input = ui.input(
@@ -1665,7 +1671,6 @@ def create_ui():
 
                 # -- Flat file upload card --
                 ff_card = ui.card().classes("w-full q-pa-md")
-                ff_card.set_visibility(False)
                 _uploaded_file: dict = {"name": "", "file": None}
 
                 with ff_card:
