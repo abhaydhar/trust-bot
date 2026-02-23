@@ -135,12 +135,12 @@ def main() -> None:
         host="127.0.0.1",
         port=port,
         title="TrustBot",
-        reload=False,
+        reload=True,
         show=False,
         storage_secret=settings.storage_secret or None,
         session_middleware_kwargs=session_kwargs,
     )
 
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     main()

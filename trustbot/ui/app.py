@@ -334,7 +334,7 @@ def _format_3agent_report(project_id: int, run_id: int, results: list[dict]) -> 
     from trustbot.ui.call_tree import build_text_tree
 
     lines = [
-        "# 3-Agent Validation Report",
+        "# Agent Validation Report",
         f"**Project ID**: {project_id} | **Run ID**: {run_id} | "
         f"**Flows validated**: {len(results)}",
         "",
@@ -693,6 +693,295 @@ def _result_to_dict(r: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# DB Entity Checker — render helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+_STATUS_COLORS = {
+    "MATCHED": "green",
+    "ONLY_IN_DB": "orange",
+    "ONLY_IN_NEO4J": "red",
+    "TYPE_MISMATCH": "yellow-9",
+}
+
+_STATUS_BG = {
+    "MATCHED": "bg-green-1",
+    "ONLY_IN_DB": "bg-orange-1",
+    "ONLY_IN_NEO4J": "bg-red-1",
+    "TYPE_MISMATCH": "bg-yellow-1",
+}
+
+
+def _render_db_entity_results(
+    summary,
+    db_tables,
+    neo4j_entities,
+    neo4j_warning,
+    summary_cards_row,
+    summary_table_container,
+    db_tables_container,
+    neo4j_entities_container,
+    discrepancies_container,
+):
+    """Populate all four result sub-tabs for the DB Entity Checker."""
+    from trustbot.models.db_entity import SchemaComparisonSummary
+
+    # ---- Summary sub-tab ----
+    summary_cards_row.clear()
+    with summary_cards_row:
+        for label, value, color in [
+            ("Total Tables", summary.total_tables, "blue"),
+            ("Matched", summary.matched_tables, "green"),
+            ("Only in DB", summary.only_in_db, "orange"),
+            ("Only in Neo4j", summary.only_in_neo4j, "red"),
+        ]:
+            with ui.card().classes(f"q-pa-sm items-center").style(
+                "min-width: 120px;"
+            ):
+                ui.label(str(value)).classes(
+                    f"text-h4 text-weight-bold text-{color}"
+                )
+                ui.label(label).classes("text-caption text-grey-8")
+
+    summary_table_container.clear()
+    with summary_table_container:
+        if neo4j_warning:
+            ui.label(neo4j_warning).classes("text-orange-8 q-mb-sm")
+
+        if summary.matched_tables > 0:
+            col_summary_text = (
+                f"**Column-level** (across {summary.matched_tables} matched tables): "
+                f"{summary.matched_columns} matched, "
+                f"{summary.columns_only_in_db} DB-only, "
+                f"{summary.columns_only_in_neo4j} Neo4j-only, "
+                f"{summary.type_mismatches} type mismatches"
+            )
+            ui.markdown(col_summary_text)
+
+        rows = []
+        for idx, r in enumerate(summary.results, 1):
+            col_info = ""
+            if r.status == "MATCHED" and r.column_discrepancies:
+                matched_c = sum(
+                    1 for d in r.column_discrepancies if d.status == "MATCHED"
+                )
+                total_c = len(r.column_discrepancies)
+                issues = total_c - matched_c
+                col_info = (
+                    f"{matched_c}/{total_c} columns matched"
+                    + (f", {issues} issue(s)" if issues else "")
+                )
+            rows.append({
+                "num": idx,
+                "table": r.table_name,
+                "status": r.status,
+                "db_cols": len(r.db_columns),
+                "neo4j_fields": len(r.neo4j_fields),
+                "col_info": col_info,
+            })
+
+        ui.table(
+            columns=[
+                {"name": "num", "label": "#", "field": "num", "sortable": True},
+                {"name": "table", "label": "Table Name", "field": "table", "sortable": True},
+                {"name": "status", "label": "Status", "field": "status", "sortable": True},
+                {"name": "db_cols", "label": "DB Columns", "field": "db_cols", "sortable": True},
+                {"name": "neo4j_fields", "label": "Neo4j Fields", "field": "neo4j_fields", "sortable": True},
+                {"name": "col_info", "label": "Column Details", "field": "col_info"},
+            ],
+            rows=rows,
+            pagination={"rowsPerPage": 25},
+        ).classes("w-full")
+
+    # ---- Database Tables sub-tab ----
+    db_tables_container.clear()
+    with db_tables_container:
+        if not db_tables:
+            ui.label("No tables found in the database schema.").classes(
+                "text-grey-7"
+            )
+        else:
+            ui.label(
+                f"{len(db_tables)} table(s) from database"
+            ).classes("text-lg text-weight-bold q-mb-sm")
+            for tbl in db_tables:
+                with ui.expansion(
+                    f"{tbl.name} ({len(tbl.columns)} columns)"
+                ).classes("w-full bordered rounded-borders q-mb-xs"):
+                    if tbl.columns:
+                        col_rows = []
+                        for i, c in enumerate(tbl.columns, 1):
+                            pk_str = "PK" if c.is_primary_key else ""
+                            null_str = "NULL" if c.is_nullable else "NOT NULL"
+                            col_rows.append({
+                                "num": i,
+                                "name": c.name,
+                                "type": c.data_type,
+                                "nullable": null_str,
+                                "pk": pk_str,
+                            })
+                        ui.table(
+                            columns=[
+                                {"name": "num", "label": "#", "field": "num"},
+                                {"name": "name", "label": "Column", "field": "name", "sortable": True},
+                                {"name": "type", "label": "Type", "field": "type"},
+                                {"name": "nullable", "label": "Nullable", "field": "nullable"},
+                                {"name": "pk", "label": "PK", "field": "pk"},
+                            ],
+                            rows=col_rows,
+                            pagination={"rowsPerPage": 50},
+                        ).classes("w-full")
+                    else:
+                        ui.label("No columns.").classes("text-grey-6")
+
+    # ---- Neo4j Entities sub-tab ----
+    neo4j_entities_container.clear()
+    with neo4j_entities_container:
+        if neo4j_warning:
+            ui.label(neo4j_warning).classes("text-orange-8 q-mb-sm")
+        if not neo4j_entities:
+            ui.label("No DatabaseEntity nodes found.").classes("text-grey-7")
+        else:
+            ui.label(
+                f"{len(neo4j_entities)} DatabaseEntity node(s) from Neo4j"
+            ).classes("text-lg text-weight-bold q-mb-sm")
+            for ent in neo4j_entities:
+                with ui.expansion(
+                    f"{ent.name} ({len(ent.fields)} fields)"
+                ).classes("w-full bordered rounded-borders q-mb-xs"):
+                    if ent.fields:
+                        field_rows = []
+                        for i, f in enumerate(ent.fields, 1):
+                            pk_str = "PK" if f.is_primary_key else ""
+                            null_str = "NULL" if f.is_nullable else "NOT NULL"
+                            field_rows.append({
+                                "num": i,
+                                "name": f.name,
+                                "type": f.data_type,
+                                "nullable": null_str,
+                                "pk": pk_str,
+                            })
+                        ui.table(
+                            columns=[
+                                {"name": "num", "label": "#", "field": "num"},
+                                {"name": "name", "label": "Field", "field": "name", "sortable": True},
+                                {"name": "type", "label": "Type", "field": "type"},
+                                {"name": "nullable", "label": "Nullable", "field": "nullable"},
+                                {"name": "pk", "label": "PK", "field": "pk"},
+                            ],
+                            rows=field_rows,
+                            pagination={"rowsPerPage": 50},
+                        ).classes("w-full")
+                    else:
+                        ui.label("No fields.").classes("text-grey-6")
+
+    # ---- Discrepancies sub-tab ----
+    discrepancies_container.clear()
+    with discrepancies_container:
+        issues = [
+            r for r in summary.results
+            if r.status != "MATCHED"
+            or any(d.status != "MATCHED" for d in r.column_discrepancies)
+        ]
+        if not issues:
+            ui.label(
+                "No discrepancies found. All tables and columns match."
+            ).classes("text-green-8 text-lg text-weight-bold")
+        else:
+            ui.label(
+                f"{len(issues)} table(s) with discrepancies"
+            ).classes("text-lg text-weight-bold text-red-8 q-mb-sm")
+
+            for r in issues:
+                badge_color = _STATUS_COLORS.get(r.status, "grey")
+                with ui.expansion(
+                    f"{r.table_name}"
+                ).classes(
+                    f"w-full bordered rounded-borders q-mb-xs {_STATUS_BG.get(r.status, '')}"
+                ):
+                    with ui.row().classes("items-center gap-2 q-mb-sm"):
+                        ui.badge(r.status, color=badge_color)
+                        if r.status == "ONLY_IN_DB":
+                            ui.label(
+                                f"Table exists in database ({len(r.db_columns)} columns) "
+                                f"but NOT in Neo4j."
+                            )
+                        elif r.status == "ONLY_IN_NEO4J":
+                            ui.label(
+                                f"Table exists in Neo4j ({len(r.neo4j_fields)} fields) "
+                                f"but NOT in database."
+                            )
+                        else:
+                            col_issues = [
+                                d for d in r.column_discrepancies
+                                if d.status != "MATCHED"
+                            ]
+                            ui.label(
+                                f"Table matched but {len(col_issues)} column-level "
+                                f"discrepanc{'y' if len(col_issues) == 1 else 'ies'} found."
+                            )
+
+                    if r.status == "MATCHED" and r.column_discrepancies:
+                        disc_rows = []
+                        for i, d in enumerate(r.column_discrepancies, 1):
+                            disc_rows.append({
+                                "num": i,
+                                "column": d.column_name,
+                                "status": d.status,
+                                "db_type": d.db_type or "-",
+                                "neo4j_type": d.neo4j_type or "-",
+                            })
+                        ui.table(
+                            columns=[
+                                {"name": "num", "label": "#", "field": "num"},
+                                {"name": "column", "label": "Column", "field": "column", "sortable": True},
+                                {"name": "status", "label": "Status", "field": "status", "sortable": True},
+                                {"name": "db_type", "label": "DB Type", "field": "db_type"},
+                                {"name": "neo4j_type", "label": "Neo4j Type", "field": "neo4j_type"},
+                            ],
+                            rows=disc_rows,
+                            pagination={"rowsPerPage": 50},
+                        ).classes("w-full")
+
+                    elif r.status == "ONLY_IN_DB" and r.db_columns:
+                        ui.label("Columns in database:").classes("text-weight-bold")
+                        col_rows = []
+                        for i, c in enumerate(r.db_columns, 1):
+                            col_rows.append({
+                                "num": i,
+                                "name": c.name,
+                                "type": c.data_type,
+                            })
+                        ui.table(
+                            columns=[
+                                {"name": "num", "label": "#", "field": "num"},
+                                {"name": "name", "label": "Column", "field": "name"},
+                                {"name": "type", "label": "Type", "field": "type"},
+                            ],
+                            rows=col_rows,
+                            pagination={"rowsPerPage": 50},
+                        ).classes("w-full")
+
+                    elif r.status == "ONLY_IN_NEO4J" and r.neo4j_fields:
+                        ui.label("Fields in Neo4j:").classes("text-weight-bold")
+                        field_rows = []
+                        for i, f in enumerate(r.neo4j_fields, 1):
+                            field_rows.append({
+                                "num": i,
+                                "name": f.name,
+                                "type": f.data_type,
+                            })
+                        ui.table(
+                            columns=[
+                                {"name": "num", "label": "#", "field": "num"},
+                                {"name": "name", "label": "Field", "field": "name"},
+                                {"name": "type", "label": "Type", "field": "type"},
+                            ],
+                            rows=field_rows,
+                            pagination={"rowsPerPage": 50},
+                        ).classes("w-full")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # NiceGUI Page
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -747,6 +1036,7 @@ def create_ui():
             tab_chunks = ui.tab("3. Chunk Visualizer")
             tab_chat = ui.tab("4. Chat")
             tab_mgmt = ui.tab("5. Index Management")
+            tab_db_entity = ui.tab("6. DB Entity Checker")
 
         with ui.tab_panels(tabs, value=tab_indexer).classes("w-full"):
 
@@ -1321,3 +1611,312 @@ def create_ui():
                 incr_btn.on_click(lambda: _on_reindex(False))
                 full_btn.on_click(lambda: _on_reindex(True))
                 status_btn.on_click(_on_status)
+
+            # ═══════════════════════════════════════════════════════════
+            # Tab 6: DB Entity Checker
+            # ═══════════════════════════════════════════════════════════
+            with ui.tab_panel(tab_db_entity):
+                ui.markdown(
+                    "### Database Entity Verification\n"
+                    "Verify that database entities in Neo4j match the actual "
+                    "database schema. Connect to PostgreSQL or upload a flat "
+                    "file containing schema information, then compare against "
+                    "`DatabaseEntity` / `DatabaseField` nodes in Neo4j."
+                )
+
+                with ui.row().classes("w-full gap-4 items-end"):
+                    db_project_id_input = ui.input(
+                        label="Project ID", placeholder="e.g. 3151",
+                    ).classes("flex-grow")
+                    db_run_id_input = ui.input(
+                        label="Run ID", placeholder="e.g. 4912",
+                    ).classes("flex-grow")
+
+                db_source_radio = ui.radio(
+                    ["PostgreSQL Connection", "Flat File Upload"],
+                    value="PostgreSQL Connection",
+                ).props("inline")
+
+                # -- PostgreSQL credential card --
+                pg_card = ui.card().classes("w-full q-pa-md")
+                with pg_card:
+                    with ui.row().classes("w-full gap-4"):
+                        pg_host_input = ui.input(
+                            label="Host", placeholder="db-server.example.com",
+                        ).classes("flex-grow-[3]")
+                        pg_port_input = ui.input(
+                            label="Port", value="5432", placeholder="5432",
+                        ).classes("flex-grow")
+                    with ui.row().classes("w-full gap-4"):
+                        pg_db_input = ui.input(
+                            label="Database", placeholder="mydb",
+                        ).classes("flex-grow")
+                        pg_schema_input = ui.input(
+                            label="Schema", value="public", placeholder="public",
+                        ).classes("flex-grow")
+                    with ui.row().classes("w-full gap-4"):
+                        pg_user_input = ui.input(
+                            label="Username", placeholder="admin",
+                        ).classes("flex-grow")
+                        pg_pass_input = ui.input(
+                            label="Password", placeholder="password",
+                            password=True, password_toggle_button=True,
+                        ).classes("flex-grow")
+
+                # -- Flat file upload card --
+                ff_card = ui.card().classes("w-full q-pa-md")
+                ff_card.set_visibility(False)
+                _uploaded_file: dict = {"name": "", "file": None}
+
+                with ff_card:
+                    def _handle_upload(e):
+                        _uploaded_file["name"] = e.file.name
+                        _uploaded_file["file"] = e.file
+                        ff_upload_status.set_text(
+                            f"Uploaded: {e.file.name} "
+                            f"({e.file.size():,} bytes)"
+                        )
+
+                    ui.upload(
+                        label="Upload schema file (.csv, .json, .xlsx)",
+                        auto_upload=True,
+                        on_upload=_handle_upload,
+                    ).props('accept=".csv,.json,.xlsx"').classes("w-full")
+                    ff_upload_status = ui.label("")
+                    ui.markdown(
+                        "**Supported formats:** CSV, JSON, Excel (.xlsx)"
+                    )
+                    with ui.expansion("Sample CSV format").classes("w-full"):
+                        ui.code(
+                            "table_name,column_name,data_type,is_nullable,is_primary_key\n"
+                            "users,id,integer,false,true\n"
+                            "users,name,varchar,false,false\n"
+                            "users,email,varchar,true,false\n"
+                            "orders,id,integer,false,true\n"
+                            "orders,user_id,integer,false,false\n"
+                            "orders,total,numeric,false,false",
+                            language="csv",
+                        )
+                    with ui.expansion("Sample JSON format").classes("w-full"):
+                        ui.code(
+                            '{\n'
+                            '  "tables": [\n'
+                            '    {\n'
+                            '      "name": "users",\n'
+                            '      "columns": [\n'
+                            '        {"name": "id", "data_type": "integer", '
+                            '"is_nullable": false, "is_primary_key": true},\n'
+                            '        {"name": "name", "data_type": "varchar", '
+                            '"is_nullable": false, "is_primary_key": false}\n'
+                            '      ]\n'
+                            '    }\n'
+                            '  ]\n'
+                            '}',
+                            language="json",
+                        )
+
+                def _toggle_db_source(e):
+                    is_pg = e.value == "PostgreSQL Connection"
+                    pg_card.set_visibility(is_pg)
+                    ff_card.set_visibility(not is_pg)
+
+                db_source_radio.on_value_change(_toggle_db_source)
+
+                db_compare_btn = ui.button("Compare Entities", color="primary")
+                db_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
+                db_progress.set_visibility(False)
+                db_status_label = ui.label("")
+
+                # -- Results section (hidden until comparison runs) --
+                db_results_section = ui.column().classes("w-full gap-2")
+                db_results_section.set_visibility(False)
+
+                with db_results_section:
+                    with ui.tabs().classes("w-full") as db_result_tabs:
+                        db_tab_summary = ui.tab("Summary")
+                        db_tab_db_tables = ui.tab("Database Tables")
+                        db_tab_neo4j = ui.tab("Neo4j Entities")
+                        db_tab_discrepancies = ui.tab("Discrepancies")
+
+                    with ui.tab_panels(db_result_tabs, value=db_tab_summary).classes("w-full"):
+
+                        # -- Summary sub-tab --
+                        with ui.tab_panel(db_tab_summary):
+                            db_summary_cards = ui.row().classes("w-full gap-4 q-mb-md")
+                            db_summary_table_container = ui.column().classes("w-full")
+
+                        # -- Database Tables sub-tab --
+                        with ui.tab_panel(db_tab_db_tables):
+                            db_tables_container = ui.column().classes("w-full")
+
+                        # -- Neo4j Entities sub-tab --
+                        with ui.tab_panel(db_tab_neo4j):
+                            neo4j_entities_container = ui.column().classes("w-full")
+
+                        # -- Discrepancies sub-tab --
+                        with ui.tab_panel(db_tab_discrepancies):
+                            discrepancies_container = ui.column().classes("w-full")
+
+                async def _on_compare_entities():
+                    from trustbot.models.db_entity import (
+                        SchemaComparisonSummary,
+                    )
+
+                    p_str = (db_project_id_input.value or "").strip()
+                    r_str = (db_run_id_input.value or "").strip()
+                    if not p_str or not r_str:
+                        db_status_label.set_text(
+                            "Please enter both Project ID and Run ID."
+                        )
+                        return
+                    try:
+                        project_id = int(p_str)
+                        run_id = int(r_str)
+                    except ValueError:
+                        db_status_label.set_text(
+                            "Project ID and Run ID must be integers."
+                        )
+                        return
+
+                    db_compare_btn.disable()
+                    db_progress.set_visibility(True)
+                    db_progress.set_value(0.0)
+                    db_status_label.set_text("Starting comparison...")
+
+                    # --- Step 1: Fetch DB schema ---
+                    db_tables = []
+                    try:
+                        if db_source_radio.value == "PostgreSQL Connection":
+                            host = (pg_host_input.value or "").strip()
+                            port_str = (pg_port_input.value or "5432").strip()
+                            database = (pg_db_input.value or "").strip()
+                            schema = (pg_schema_input.value or "public").strip()
+                            username = (pg_user_input.value or "").strip()
+                            password = pg_pass_input.value or ""
+
+                            if not host:
+                                db_status_label.set_text("Please enter the database host.")
+                                db_compare_btn.enable()
+                                db_progress.set_visibility(False)
+                                return
+                            if not database:
+                                db_status_label.set_text("Please enter the database name.")
+                                db_compare_btn.enable()
+                                db_progress.set_visibility(False)
+                                return
+                            if not username:
+                                db_status_label.set_text("Please enter the database username.")
+                                db_compare_btn.enable()
+                                db_progress.set_visibility(False)
+                                return
+
+                            db_status_label.set_text(
+                                f"Connecting to PostgreSQL at {host}:{port_str}/{database}..."
+                            )
+                            db_progress.set_value(0.1)
+
+                            from trustbot.tools.db_schema_tool import fetch_pg_schema
+                            db_tables = await fetch_pg_schema(
+                                host=host,
+                                port=int(port_str),
+                                database=database,
+                                schema=schema,
+                                username=username,
+                                password=password,
+                            )
+
+                        else:
+                            if not _uploaded_file["file"]:
+                                db_status_label.set_text("Please upload a schema file.")
+                                db_compare_btn.enable()
+                                db_progress.set_visibility(False)
+                                return
+
+                            db_status_label.set_text(
+                                f"Parsing {_uploaded_file['name']}..."
+                            )
+                            db_progress.set_value(0.1)
+
+                            file_content = await _uploaded_file["file"].read()
+                            from trustbot.tools.db_schema_tool import parse_schema_file
+                            db_tables = parse_schema_file(
+                                _uploaded_file["name"],
+                                file_content,
+                            )
+
+                    except Exception as exc:
+                        logger.exception("Failed to fetch DB schema")
+                        db_status_label.set_text(f"Error fetching DB schema: {exc}")
+                        db_compare_btn.enable()
+                        db_progress.set_visibility(False)
+                        return
+
+                    db_progress.set_value(0.4)
+                    db_status_label.set_text(
+                        f"Fetched {len(db_tables)} tables from DB. "
+                        f"Querying Neo4j for DatabaseEntity nodes..."
+                    )
+
+                    # --- Step 2: Fetch Neo4j entities ---
+                    neo4j_entities = []
+                    neo4j_warning = ""
+                    try:
+                        neo4j_tool = registry.get("neo4j")
+                        from trustbot.tools.neo4j_entity_tool import (
+                            fetch_database_entities,
+                        )
+                        neo4j_entities = await fetch_database_entities(
+                            driver=neo4j_tool.driver,
+                            project_id=project_id,
+                            run_id=run_id,
+                        )
+                        if not neo4j_entities:
+                            neo4j_warning = (
+                                f"No DatabaseEntity nodes found for "
+                                f"project_id={project_id}, run_id={run_id}."
+                            )
+                    except KeyError:
+                        neo4j_warning = (
+                            "Neo4j tool not available. Only DB schema will be displayed."
+                        )
+                    except Exception as exc:
+                        logger.exception("Failed to query Neo4j entities")
+                        neo4j_warning = f"Neo4j query failed: {exc}"
+
+                    db_progress.set_value(0.7)
+                    db_status_label.set_text("Comparing schemas...")
+
+                    # --- Step 3: Compare ---
+                    from trustbot.services.schema_comparator import compare_schemas
+                    summary = compare_schemas(db_tables, neo4j_entities)
+
+                    db_progress.set_value(0.9)
+                    db_status_label.set_text("Rendering results...")
+
+                    # --- Step 4: Render results ---
+                    _render_db_entity_results(
+                        summary,
+                        db_tables,
+                        neo4j_entities,
+                        neo4j_warning,
+                        db_summary_cards,
+                        db_summary_table_container,
+                        db_tables_container,
+                        neo4j_entities_container,
+                        discrepancies_container,
+                    )
+
+                    db_results_section.set_visibility(True)
+                    db_progress.set_value(1.0)
+                    status_msg = (
+                        f"Comparison complete: {summary.total_tables} tables "
+                        f"({summary.matched_tables} matched, "
+                        f"{summary.only_in_db} DB-only, "
+                        f"{summary.only_in_neo4j} Neo4j-only)"
+                    )
+                    if neo4j_warning:
+                        status_msg += f"  |  {neo4j_warning}"
+                    db_status_label.set_text(status_msg)
+                    db_compare_btn.enable()
+
+                db_compare_btn.on_click(_on_compare_entities)

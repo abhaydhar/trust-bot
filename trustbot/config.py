@@ -64,7 +64,11 @@ class Settings(BaseSettings):
     enable_celery: bool = False
     enable_browser_tool: bool = False
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
 
     def get_litellm_kwargs(self) -> dict:
         """Return common kwargs for all LiteLLM calls (api_base, api_key)."""

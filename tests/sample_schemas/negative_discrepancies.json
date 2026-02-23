@@ -1,0 +1,570 @@
+{
+  "tables": [
+    {
+      "name": "ACCOUNT-FILE",
+      "columns": [
+        {
+          "name": "FD-ACCT-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-ACCT-ID",
+          "data_type": "NUMERIC(11)",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-ACCTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "ACCT-FILE",
+      "columns": [
+        {
+          "name": "FD-ACCT-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-ACCT-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-ACCTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "ACCTFILE-FILE",
+      "columns": [
+        {
+          "name": "FD-ACCT-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-ACCT-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-ACCTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "CARD-FILE",
+      "columns": [
+        {
+          "name": "FD-CARD-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CARD-NUM",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CARD-EXPIRY",
+          "data_type": "DATE",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CARDFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "CARDFILE-FILE",
+      "columns": [
+        {
+          "name": "FD-CARD-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CARD-NUM",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CARDFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "CUST-FILE",
+      "columns": [
+        {
+          "name": "FD-CUST-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CUST-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CUSTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "CUSTFILE-FILE",
+      "columns": [
+        {
+          "name": "FD-CUST-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CUST-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CUSTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "CUSTOMER-FILE",
+      "columns": [
+        {
+          "name": "FD-CUST-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CUST-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-CUSTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "DALYTRAN-FILE",
+      "columns": [
+        {
+          "name": "FD-CUST-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-RECORD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "DATE-PARMS-FILE",
+      "columns": [
+        {
+          "name": "FD-DATEPARM-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "DISCGRP-FILE",
+      "columns": [
+        {
+          "name": "FD-DIS-ACCT-GROUP-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-DIS-TRAN-CAT-CD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-DIS-TRAN-TYPE-CD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-DISCGRP-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-DISCGRP-KEY",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-DISCGRP-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "REPORT-FILE",
+      "columns": [
+        {
+          "name": "FD-REPTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "STMT-FILE",
+      "columns": [
+        {
+          "name": "FD-STMTFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "TCATBAL-FILE",
+      "columns": [
+        {
+          "name": "FD-FD-TRAN-CAT-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-CAT-BAL-RECORD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-CAT-KEY",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRANCAT-ACCT-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRANCAT-CD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRANCAT-TYPE-CD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "TRANCATG-FILE",
+      "columns": [
+        {
+          "name": "FD-TRAN-CAT-CD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-CAT-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-CAT-KEY",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-CAT-RECORD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-TYPE-CD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "TRANSACT-FILE",
+      "columns": [
+        {
+          "name": "FD-ACCT-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-FILLER",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-PROC-TS",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRANFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRANS-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRANS-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "TRANTYPE-FILE",
+      "columns": [
+        {
+          "name": "FD-TRAN-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRAN-TYPE",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRANTYPE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "TRNX-FILE",
+      "columns": [
+        {
+          "name": "FD-ACCT-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRNX-CARD",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRNX-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRNXFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-TRNXS-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "XREF-FILE",
+      "columns": [
+        {
+          "name": "FD-CARDXREF-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-XREF-ACCT-ID",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-XREF-CARD-NUM",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-XREF-CUST-NUM",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-XREF-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-XREFFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "XREFFILE-FILE",
+      "columns": [
+        {
+          "name": "FD-XREF-CARD-NUM",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-XREF-DATA",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-XREFFILE-REC",
+          "data_type": "NA",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "AUDIT-LOG-FILE",
+      "columns": [
+        {
+          "name": "FD-AUDIT-ID",
+          "data_type": "NUMERIC(9)",
+          "is_nullable": false,
+          "is_primary_key": true
+        },
+        {
+          "name": "FD-AUDIT-ACTION",
+          "data_type": "VARCHAR(50)",
+          "is_nullable": false,
+          "is_primary_key": false
+        },
+        {
+          "name": "FD-AUDIT-TIMESTAMP",
+          "data_type": "TIMESTAMP",
+          "is_nullable": false,
+          "is_primary_key": false
+        }
+      ]
+    },
+    {
+      "name": "TEMP-BATCH-FILE",
+      "columns": [
+        {
+          "name": "FD-BATCH-ID",
+          "data_type": "NUMERIC(6)",
+          "is_nullable": false,
+          "is_primary_key": true
+        },
+        {
+          "name": "FD-BATCH-DATA",
+          "data_type": "VARCHAR(500)",
+          "is_nullable": true,
+          "is_primary_key": false
+        }
+      ]
+    }
+  ]
+}
