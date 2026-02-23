@@ -54,6 +54,7 @@ logging.basicConfig(
 logger = logging.getLogger("trustbot")
 
 _registry: ToolRegistry | None = None
+_registry_ready = asyncio.Event()
 
 
 async def initialize_app() -> ToolRegistry:
@@ -96,6 +97,7 @@ async def _startup():
     logger.info("Codebase root: %s", settings.codebase_root.resolve())
     logger.info("LLM model: %s", settings.litellm_model)
     _registry = await initialize_app()
+    _registry_ready.set()
 
 
 @app.on_shutdown
@@ -110,7 +112,14 @@ async def _shutdown():
 
 def get_registry() -> ToolRegistry:
     """Return the initialised tool registry (available after startup)."""
-    assert _registry is not None, "Registry not initialised yet"
+    if _registry is None:
+        raise RuntimeError("Registry not initialised yet")
+    return _registry
+
+
+async def wait_for_registry() -> ToolRegistry:
+    """Wait for the registry to be ready (handles reload race condition)."""
+    await _registry_ready.wait()
     return _registry
 
 
