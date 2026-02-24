@@ -34,6 +34,8 @@ dependencies = [
     "langchain-community>=0.3.0",
     "langchain-core>=0.3.0",
     "langchain-litellm>=0.5.0",
+    # AST-based code chunking (Chonkie POC)
+    "chonkie[code]>=1.5.0",
 ]
 
 [project.optional-dependencies]
@@ -54,3 +56,7 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: tests requiring a live Neo4j instance",
+    "e2e: end-to-end UI tests",
+]

@@ -67,6 +67,12 @@ async def initialize_app() -> ToolRegistry:
     registry.register(neo4j_tool)
     registry.register(fs_tool)
 
+    from trustbot.tools.neo4j_write_tool import Neo4jWriteTool
+    neo4j_write_tool = Neo4jWriteTool()
+    registry.register(neo4j_write_tool)
+    logger.info("Neo4jWriteTool registered (topic-only writes)")
+
+
     try:
         from trustbot.tools.index_tool import IndexTool
         index_tool = IndexTool()
@@ -144,7 +150,7 @@ def main() -> None:
         host="127.0.0.1",
         port=port,
         title="TrustBot",
-        reload=True,
+        reload=False,
         show=False,
         storage_secret=settings.storage_secret or None,
         session_middleware_kwargs=session_kwargs,

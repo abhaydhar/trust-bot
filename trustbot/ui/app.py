@@ -1042,6 +1042,8 @@ def create_ui():
             tab_chat = ui.tab("4. Chat")
             tab_mgmt = ui.tab("5. Index Management")
             tab_db_entity = ui.tab("6. DB Entity Checker")
+            tab_topic_conv = ui.tab("7. Topic Convergence")
+            tab_chonkie = ui.tab("8. Chonkie Chunk POC")
 
         with ui.tab_panels(tabs, value=tab_indexer).classes("w-full"):
 
@@ -1925,3 +1927,915 @@ def create_ui():
                     db_compare_btn.enable()
 
                 db_compare_btn.on_click(_on_compare_entities)
+
+            # ═══════════════════════════════════════════════════════════
+            # Tab 7: Topic Convergence
+            # ═══════════════════════════════════════════════════════════
+            with ui.tab_panel(tab_topic_conv):
+                ui.markdown(
+                    "### Topic Convergence Analysis\n"
+                    "Analyze `topic` fields on **all** Neo4j node types "
+                    "(Snippet, DBCall, Calculation, ServiceCall, Variable, "
+                    "Job, Step, DatabaseEntity, etc.) for a given project.\n\n"
+                    "**Detects:** duplicate/similar topics, verb-noun violations, "
+                    "topic↔business_summary misalignment, journey chain breaks, "
+                    "and missing topics.\n"
+                    "**Remedials:** LLM-generated suggestions with one-click "
+                    "write-back to Neo4j and full audit log."
+                )
+
+                with ui.row().classes("w-full gap-4 items-end"):
+                    tc_project_input = ui.input(
+                        label="Project ID", placeholder="e.g. 976",
+                    ).classes("flex-grow")
+                    tc_run_input = ui.input(
+                        label="Run ID", placeholder="e.g. 2416",
+                    ).classes("flex-grow")
+
+                tc_analyze_btn = ui.button(
+                    "Analyze Topics", color="primary",
+                ).classes("q-mt-sm")
+                tc_progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
+                tc_progress.set_visibility(False)
+                tc_status_label = ui.label("")
+
+                tc_results_section = ui.column().classes("w-full gap-2")
+                tc_results_section.set_visibility(False)
+
+                with tc_results_section:
+                    with ui.tabs().classes("w-full") as tc_tabs:
+                        tc_tab_summary = ui.tab("Summary")
+                        tc_tab_all = ui.tab("All Nodes")
+                        tc_tab_dups = ui.tab("Duplicate Groups")
+                        tc_tab_journey = ui.tab("Journey Chains")
+                        tc_tab_audit = ui.tab("Audit Log")
+
+                    with ui.tab_panels(tc_tabs, value=tc_tab_summary).classes("w-full"):
+
+                        # ── Summary sub-tab ──
+                        tc_summary_container = ui.column().classes("w-full")
+                        with ui.tab_panel(tc_tab_summary):
+                            tc_summary_inner = ui.column().classes("w-full gap-2")
+
+                        # ── All Nodes sub-tab ──
+                        with ui.tab_panel(tc_tab_all):
+                            tc_all_filter_row = ui.row().classes("w-full gap-2 items-center")
+                            with tc_all_filter_row:
+                                tc_filter_type = ui.select(
+                                    label="Node Type",
+                                    options=["All"],
+                                    value="All",
+                                ).classes("w-40")
+                                tc_filter_issue = ui.select(
+                                    label="Issue",
+                                    options=["All", "duplicate", "similar", "verb_noun",
+                                             "misaligned", "journey_break", "technical_glue",
+                                             "topic_missing"],
+                                    value="All",
+                                ).classes("w-40")
+                                tc_apply_selected_btn = ui.button(
+                                    "Apply All Selected", color="positive",
+                                ).props("outline")
+                            tc_all_table_container = ui.column().classes("w-full")
+
+                        # ── Duplicate Groups sub-tab ──
+                        with ui.tab_panel(tc_tab_dups):
+                            tc_dups_container = ui.column().classes("w-full gap-2")
+
+                        # ── Journey Chains sub-tab ──
+                        with ui.tab_panel(tc_tab_journey):
+                            tc_journey_container = ui.column().classes("w-full gap-2")
+
+                        # ── Audit Log sub-tab ──
+                        with ui.tab_panel(tc_tab_audit):
+                            tc_audit_btn_row = ui.row().classes("gap-2")
+                            with tc_audit_btn_row:
+                                tc_export_json_btn = ui.button(
+                                    "Export JSON", color="secondary",
+                                ).props("outline size=sm")
+                                tc_export_csv_btn = ui.button(
+                                    "Export CSV", color="secondary",
+                                ).props("outline size=sm")
+                                tc_undo_all_btn = ui.button(
+                                    "Undo All", color="negative",
+                                ).props("outline size=sm")
+                            tc_audit_container = ui.column().classes("w-full gap-2")
+
+                # ── State holders ──
+                _tc_report = {"data": None}
+                _tc_selected_keys: set = set()
+
+                # ── Helper: render the summary sub-tab ──
+                def _render_tc_summary(report):
+                    tc_summary_inner.clear()
+                    with tc_summary_inner:
+                        with ui.row().classes("w-full gap-4"):
+                            with ui.card().classes("q-pa-md"):
+                                ui.label("Total Nodes").classes("text-caption")
+                                ui.label(str(report.total_nodes_analyzed)).classes(
+                                    "text-h4 text-weight-bold"
+                                )
+                            with ui.card().classes("q-pa-md"):
+                                ui.label("Nodes With Issues").classes("text-caption")
+                                ui.label(str(report.nodes_with_issues)).classes(
+                                    "text-h4 text-weight-bold text-negative"
+                                )
+                            with ui.card().classes("q-pa-md"):
+                                ui.label("Missing Topic").classes("text-caption")
+                                ui.label(str(report.nodes_missing_topic)).classes(
+                                    "text-h4 text-weight-bold text-warning"
+                                )
+
+                        if report.node_type_breakdown:
+                            ui.label("Node Type Breakdown").classes("text-subtitle1 q-mt-md")
+                            type_rows = [
+                                {"type": k, "count": v}
+                                for k, v in sorted(report.node_type_breakdown.items())
+                            ]
+                            ui.table(
+                                columns=[
+                                    {"name": "type", "label": "Node Type", "field": "type", "sortable": True},
+                                    {"name": "count", "label": "Count", "field": "count", "sortable": True},
+                                ],
+                                rows=type_rows,
+                            ).classes("w-full q-mt-sm")
+
+                        if report.issue_breakdown:
+                            ui.label("Issue Breakdown").classes("text-subtitle1 q-mt-md")
+                            issue_rows = [
+                                {"issue": k, "count": v}
+                                for k, v in sorted(report.issue_breakdown.items())
+                            ]
+                            ui.table(
+                                columns=[
+                                    {"name": "issue", "label": "Issue Type", "field": "issue", "sortable": True},
+                                    {"name": "count", "label": "Count", "field": "count", "sortable": True},
+                                ],
+                                rows=issue_rows,
+                            ).classes("w-full q-mt-sm")
+
+                # ── Helper: render all-nodes table ──
+                def _render_tc_all_nodes(report, type_filter="All", issue_filter="All"):
+                    tc_all_table_container.clear()
+                    analyses = report.analyses or []
+
+                    if type_filter != "All":
+                        analyses = [a for a in analyses if a.node_type == type_filter]
+                    if issue_filter != "All":
+                        analyses = [a for a in analyses if issue_filter in [i.value for i in a.issues]]
+
+                    rows = []
+                    for a in analyses:
+                        issues_str = ", ".join(i.value for i in a.issues) if a.issues else "clean"
+                        rows.append({
+                            "key": a.node_key,
+                            "node_type": a.node_type,
+                            "parent": a.parent_snippet_key or "-",
+                            "ef": a.execution_flow_name or a.execution_flow_key,
+                            "topic": a.current_topic or "(missing)",
+                            "business_summary": (a.business_summary[:80] + "...") if len(a.business_summary) > 80 else a.business_summary,
+                            "issues": issues_str,
+                            "suggestion": a.suggested_topic,
+                            "confidence": f"{a.confidence:.0%}" if a.confidence else "-",
+                        })
+
+                    with tc_all_table_container:
+                        if not rows:
+                            ui.label("No nodes match the current filters.").classes("text-italic")
+                            return
+
+                        columns = [
+                            {"name": "key", "label": "Node Key", "field": "key", "sortable": True},
+                            {"name": "node_type", "label": "Type", "field": "node_type", "sortable": True},
+                            {"name": "parent", "label": "Parent Snippet", "field": "parent", "sortable": True},
+                            {"name": "ef", "label": "Execution Flow", "field": "ef", "sortable": True},
+                            {"name": "topic", "label": "Current Topic", "field": "topic", "sortable": True},
+                            {"name": "business_summary", "label": "Business Summary", "field": "business_summary"},
+                            {"name": "issues", "label": "Issues", "field": "issues", "sortable": True},
+                            {"name": "suggestion", "label": "Suggested Topic", "field": "suggestion"},
+                            {"name": "confidence", "label": "Conf.", "field": "confidence", "sortable": True},
+                        ]
+
+                        tbl = ui.table(
+                            columns=columns,
+                            rows=rows,
+                            row_key="key",
+                            selection="multiple",
+                            pagination={"rowsPerPage": 25},
+                        ).classes("w-full")
+
+                        tbl.on("selection", lambda e: _on_table_selection(e))
+
+                        tbl.add_slot("body-cell-issues", r'''
+                            <q-td :props="props">
+                                <q-badge v-for="issue in props.value.split(', ')" :key="issue"
+                                         :color="issue === 'clean' ? 'positive' :
+                                                 (issue === 'duplicate' || issue === 'misaligned' || issue === 'topic_missing') ? 'negative' :
+                                                 'warning'"
+                                         :label="issue" class="q-mr-xs" />
+                            </q-td>
+                        ''')
+
+                        for row in rows:
+                            a = next((x for x in report.analyses if x.node_key == row["key"]), None)
+                            if a and a.suggested_topic:
+                                pass  # handled via slot above
+
+                def _on_table_selection(e):
+                    _tc_selected_keys.clear()
+                    if hasattr(e, "selection"):
+                        for item in e.selection:
+                            _tc_selected_keys.add(item.get("key", ""))
+
+                # ── Helper: render duplicate groups ──
+                def _render_tc_dups(report):
+                    tc_dups_container.clear()
+                    with tc_dups_container:
+                        if not report.duplicate_groups:
+                            ui.label("No duplicate or similar topic groups found.").classes("text-italic")
+                            return
+                        for gid, keys in report.duplicate_groups.items():
+                            with ui.expansion(f"Group: {gid} ({len(keys)} nodes)").classes("w-full"):
+                                rows = []
+                                for k in keys:
+                                    a = next((x for x in report.analyses if x.node_key == k), None)
+                                    if a:
+                                        rows.append({
+                                            "key": k,
+                                            "type": a.node_type,
+                                            "topic": a.current_topic or "(missing)",
+                                            "business_summary": a.business_summary[:100],
+                                            "suggestion": a.suggested_topic,
+                                        })
+                                if rows:
+                                    ui.table(
+                                        columns=[
+                                            {"name": "key", "label": "Key", "field": "key"},
+                                            {"name": "type", "label": "Type", "field": "type"},
+                                            {"name": "topic", "label": "Current Topic", "field": "topic"},
+                                            {"name": "business_summary", "label": "Business Summary", "field": "business_summary"},
+                                            {"name": "suggestion", "label": "Suggested", "field": "suggestion"},
+                                        ],
+                                        rows=rows,
+                                        row_key="key",
+                                    ).classes("w-full")
+
+                                    async def _apply_group(gkeys=keys):
+                                        write_tool = await _get_write_tool()
+                                        if not write_tool:
+                                            return
+                                        updates = []
+                                        for gk in gkeys:
+                                            ga = next((x for x in report.analyses if x.node_key == gk), None)
+                                            if ga and ga.suggested_topic:
+                                                updates.append({
+                                                    "key": gk,
+                                                    "label": ga.node_type,
+                                                    "new_topic": ga.suggested_topic,
+                                                })
+                                        if updates:
+                                            await write_tool.bulk_update_topics(updates)
+                                            ui.notify(f"Applied {len(updates)} group suggestions", type="positive")
+                                            _render_tc_audit(write_tool)
+
+                                    ui.button(
+                                        "Apply Group Suggestions", color="positive",
+                                        on_click=_apply_group,
+                                    ).props("outline size=sm").classes("q-mt-sm")
+
+                # ── Helper: render journey chains ──
+                def _render_tc_journey(report):
+                    tc_journey_container.clear()
+                    with tc_journey_container:
+                        if not report.journey_chains:
+                            ui.label("No journey chains found.").classes("text-italic")
+                            return
+                        for ef_key, topics in report.journey_chains.items():
+                            with ui.expansion(f"Flow: {ef_key}").classes("w-full"):
+                                chain_str = " → ".join(topics)
+                                ui.label(f"Current: {chain_str}").classes("text-body2")
+
+                                chain_analyses = [
+                                    a for a in report.analyses
+                                    if a.execution_flow_key == ef_key and a.chain_position is not None
+                                ]
+                                chain_analyses.sort(key=lambda a: a.chain_position or 0)
+
+                                if chain_analyses:
+                                    suggested_chain = " → ".join(
+                                        a.suggested_topic or a.current_topic or "(missing)"
+                                        for a in chain_analyses
+                                    )
+                                    ui.label(f"Suggested: {suggested_chain}").classes(
+                                        "text-body2 text-positive q-mt-xs"
+                                    )
+
+                                    rows = []
+                                    for a in chain_analyses:
+                                        rows.append({
+                                            "pos": a.chain_position,
+                                            "key": a.node_key,
+                                            "type": a.node_type,
+                                            "current": a.current_topic or "(missing)",
+                                            "suggested": a.suggested_topic,
+                                        })
+                                    ui.table(
+                                        columns=[
+                                            {"name": "pos", "label": "#", "field": "pos", "sortable": True},
+                                            {"name": "key", "label": "Key", "field": "key"},
+                                            {"name": "type", "label": "Type", "field": "type"},
+                                            {"name": "current", "label": "Current Topic", "field": "current"},
+                                            {"name": "suggested", "label": "Suggested Topic", "field": "suggested"},
+                                        ],
+                                        rows=rows,
+                                        row_key="key",
+                                    ).classes("w-full q-mt-sm")
+
+                                    async def _apply_chain(analyses=chain_analyses):
+                                        write_tool = await _get_write_tool()
+                                        if not write_tool:
+                                            return
+                                        updates = []
+                                        for ca in analyses:
+                                            if ca.suggested_topic:
+                                                updates.append({
+                                                    "key": ca.node_key,
+                                                    "label": ca.node_type,
+                                                    "new_topic": ca.suggested_topic,
+                                                })
+                                        if updates:
+                                            await write_tool.bulk_update_topics(
+                                                updates, execution_flow_key=ef_key,
+                                            )
+                                            ui.notify(f"Applied {len(updates)} chain suggestions", type="positive")
+                                            _render_tc_audit(write_tool)
+
+                                    ui.button(
+                                        "Apply Chain Suggestions", color="positive",
+                                        on_click=_apply_chain,
+                                    ).props("outline size=sm").classes("q-mt-sm")
+
+                # ── Helper: render audit log ──
+                def _render_tc_audit(write_tool):
+                    tc_audit_container.clear()
+                    with tc_audit_container:
+                        changes = write_tool.change_log if write_tool else []
+                        if not changes:
+                            ui.label("No changes recorded yet.").classes("text-italic")
+                            return
+                        rows = []
+                        for i, c in enumerate(changes):
+                            rows.append({
+                                "idx": i,
+                                "key": c.node_key,
+                                "label": c.node_label,
+                                "old": c.old_topic,
+                                "new": c.new_topic,
+                                "by": c.changed_by,
+                                "at": c.changed_at.strftime("%H:%M:%S"),
+                                "undo": c.is_undo,
+                            })
+                        ui.table(
+                            columns=[
+                                {"name": "key", "label": "Node Key", "field": "key"},
+                                {"name": "label", "label": "Label", "field": "label"},
+                                {"name": "old", "label": "Old Topic", "field": "old"},
+                                {"name": "new", "label": "New Topic", "field": "new"},
+                                {"name": "by", "label": "Changed By", "field": "by"},
+                                {"name": "at", "label": "Time", "field": "at"},
+                                {"name": "undo", "label": "Is Undo", "field": "undo"},
+                            ],
+                            rows=rows,
+                            row_key="idx",
+                        ).classes("w-full")
+
+                # ── Helper: get write tool ──
+                async def _get_write_tool():
+                    try:
+                        reg = await _get_registry_async()
+                        return reg.get("neo4j_write")
+                    except (KeyError, RuntimeError):
+                        ui.notify("Neo4jWriteTool not available", type="negative")
+                        return None
+
+                # ── Apply selected rows ──
+                async def _on_apply_selected():
+                    if not _tc_selected_keys:
+                        ui.notify("No rows selected", type="warning")
+                        return
+                    report = _tc_report.get("data")
+                    if not report:
+                        return
+                    write_tool = await _get_write_tool()
+                    if not write_tool:
+                        return
+                    updates = []
+                    for a in report.analyses:
+                        if a.node_key in _tc_selected_keys and a.suggested_topic:
+                            updates.append({
+                                "key": a.node_key,
+                                "label": a.node_type,
+                                "new_topic": a.suggested_topic,
+                            })
+                    if updates:
+                        await write_tool.bulk_update_topics(updates)
+                        ui.notify(f"Applied {len(updates)} suggestions", type="positive")
+                        _render_tc_audit(write_tool)
+                    else:
+                        ui.notify("No applicable suggestions for selected rows", type="info")
+
+                tc_apply_selected_btn.on_click(_on_apply_selected)
+
+                # ── Filter change handlers ──
+                def _on_filter_change():
+                    report = _tc_report.get("data")
+                    if report:
+                        _render_tc_all_nodes(
+                            report,
+                            type_filter=tc_filter_type.value,
+                            issue_filter=tc_filter_issue.value,
+                        )
+
+                tc_filter_type.on("update:model-value", lambda _: _on_filter_change())
+                tc_filter_issue.on("update:model-value", lambda _: _on_filter_change())
+
+                # ── Export buttons ──
+                async def _on_export_json():
+                    write_tool = await _get_write_tool()
+                    if write_tool:
+                        content = write_tool.export_audit_json()
+                        ui.download(content.encode(), "topic_audit_log.json")
+
+                async def _on_export_csv():
+                    write_tool = await _get_write_tool()
+                    if write_tool:
+                        content = write_tool.export_audit_csv()
+                        ui.download(content.encode(), "topic_audit_log.csv")
+
+                async def _on_undo_all():
+                    write_tool = await _get_write_tool()
+                    if not write_tool:
+                        return
+                    non_undo = [c for c in write_tool.change_log if not c.is_undo]
+                    for c in reversed(non_undo):
+                        await write_tool.restore_topic(
+                            c.node_key, c.node_label, c.old_topic,
+                            execution_flow_key=c.execution_flow_key,
+                        )
+                    ui.notify(f"Reverted {len(non_undo)} changes", type="positive")
+                    _render_tc_audit(write_tool)
+
+                tc_export_json_btn.on_click(_on_export_json)
+                tc_export_csv_btn.on_click(_on_export_csv)
+                tc_undo_all_btn.on_click(_on_undo_all)
+
+                # ── Shared state for background task + timer-based polling ──
+                _tc_progress_state = {"pct": 0.0, "msg": "", "done": False, "error": ""}
+                _tc_bg_report = {"data": None}
+
+                # ── Main analyze handler ──
+                async def _on_analyze_topics():
+                    pid_str = tc_project_input.value
+                    rid_str = tc_run_input.value
+                    if not pid_str or not rid_str:
+                        ui.notify("Please enter both Project ID and Run ID", type="warning")
+                        return
+
+                    try:
+                        pid = int(pid_str)
+                        rid = int(rid_str)
+                    except ValueError:
+                        ui.notify("Project ID and Run ID must be integers", type="negative")
+                        return
+
+                    tc_analyze_btn.disable()
+                    tc_progress.set_visibility(True)
+                    tc_progress.set_value(0)
+                    tc_status_label.set_text("Starting analysis...")
+                    tc_results_section.set_visibility(False)
+                    _tc_progress_state.update(pct=0.0, msg="Starting analysis...", done=False, error="")
+                    _tc_bg_report["data"] = None
+
+                    try:
+                        reg = await _get_registry_async()
+                        neo4j_tool = reg.get("neo4j")
+                    except (KeyError, RuntimeError) as exc:
+                        ui.notify(f"Neo4j tool not available: {exc}", type="negative")
+                        tc_analyze_btn.enable()
+                        tc_progress.set_visibility(False)
+                        return
+
+                    from trustbot.agents.topic_convergence import TopicConvergenceAgent
+
+                    agent = TopicConvergenceAgent(neo4j_tool)
+
+                    def _progress_cb(pct, msg):
+                        _tc_progress_state["pct"] = pct
+                        _tc_progress_state["msg"] = msg
+
+                    async def _run_analysis():
+                        """Runs in background — no UI calls here, only state updates."""
+                        logger.info("[TC-UI] Background analysis task STARTED for pid=%d rid=%d", pid, rid)
+                        try:
+                            report = await agent.analyze(
+                                pid, rid, progress_callback=_progress_cb,
+                            )
+                            _tc_bg_report["data"] = report
+                            _tc_progress_state["done"] = True
+                            logger.info(
+                                "[TC-UI] Background analysis task COMPLETED: %d nodes, %d issues",
+                                report.total_nodes_analyzed, report.nodes_with_issues,
+                            )
+                        except Exception as exc:
+                            logger.exception("[TC-UI] Background analysis task FAILED: %s", exc)
+                            _tc_progress_state["error"] = str(exc)
+                            _tc_progress_state["done"] = True
+
+                    from nicegui import background_tasks
+                    logger.info("[TC-UI] Launching background task...")
+                    background_tasks.create(_run_analysis())
+
+                    def _poll_progress():
+                        tc_progress.set_value(_tc_progress_state["pct"])
+                        tc_status_label.set_text(_tc_progress_state["msg"])
+
+                        if not _tc_progress_state["done"]:
+                            return
+
+                        logger.info("[TC-UI] Poll detected done=True, rendering results...")
+                        poll_timer.deactivate()
+
+                        if _tc_progress_state["error"]:
+                            ui.notify(
+                                f"Analysis failed: {_tc_progress_state['error']}",
+                                type="negative",
+                            )
+                            tc_analyze_btn.enable()
+                            tc_progress.set_visibility(False)
+                            return
+
+                        report = _tc_bg_report["data"]
+                        if report is None:
+                            tc_analyze_btn.enable()
+                            tc_progress.set_visibility(False)
+                            return
+
+                        _tc_report["data"] = report
+
+                        node_types = sorted(set(a.node_type for a in report.analyses))
+                        tc_filter_type.options = ["All"] + node_types
+                        tc_filter_type.value = "All"
+
+                        _render_tc_summary(report)
+                        _render_tc_all_nodes(report)
+                        _render_tc_dups(report)
+                        _render_tc_journey(report)
+
+                        try:
+                            reg = _get_registry()
+                            wt = reg.get("neo4j_write")
+                        except (KeyError, RuntimeError):
+                            wt = None
+                        _render_tc_audit(wt)
+
+                        tc_results_section.set_visibility(True)
+                        tc_progress.set_value(1.0)
+                        tc_status_label.set_text(
+                            f"Analysis complete: {report.total_nodes_analyzed} nodes, "
+                            f"{report.nodes_with_issues} with issues"
+                        )
+                        tc_analyze_btn.enable()
+                        tabs.set_value(tab_topic_conv)
+                        logger.info("[TC-UI] Results rendered successfully on Tab 7")
+
+                    poll_timer = ui.timer(0.5, _poll_progress)
+                    logger.info("[TC-UI] Handler returned — background task running, poll timer active")
+
+                tc_analyze_btn.on_click(_on_analyze_topics)
+
+            # ═══════════════════════════════════════════════════════════
+            # Tab 8: Chonkie CodeChunker POC
+            # ═══════════════════════════════════════════════════════════
+            with ui.tab_panel(tab_chonkie):
+                ui.markdown(
+                    "### Chonkie CodeChunker POC\n"
+                    "Compare **3 chunking approaches** side-by-side:\n"
+                    "1. **Regex** -- current TrustBot chunker (pattern matching)\n"
+                    "2. **Chonkie AST** -- tree-sitter based (165+ languages)\n"
+                    "3. **Structural** -- scope-aware block-boundary parser "
+                    "(for RPG, FOCUS, Natural where no AST exists)\n\n"
+                    "Paste code below **or** pick a sample file, then click "
+                    "**Run Comparison**."
+                )
+
+                _CHONKIE_SAMPLES: dict[str, Path] = {}
+                _sample_root = Path(__file__).resolve().parents[1] / "sample_codebase"
+                _sample_exts = {
+                    ".py", ".js", ".ts", ".java", ".go", ".cs", ".kt", ".rs",
+                    ".cpp", ".c", ".rb", ".pas", ".dpr", ".cbl", ".cob",
+                    ".rpg", ".rpgle", ".foc", ".nat",
+                }
+                if _sample_root.exists():
+                    for _sf in sorted(_sample_root.rglob("*")):
+                        if _sf.is_file() and _sf.suffix.lower() in _sample_exts:
+                            _label = str(_sf.relative_to(_sample_root)).replace("\\", "/")
+                            _CHONKIE_SAMPLES[_label] = _sf
+
+                with ui.row().classes("w-full gap-4 items-end"):
+                    chonkie_lang_select = ui.select(
+                        ["auto", "python", "javascript", "typescript", "java",
+                         "go", "csharp", "kotlin", "rust", "cpp", "c", "ruby",
+                         "pascal (Delphi)", "cobol", "scala", "swift", "php",
+                         "rpg", "focus", "natural"],
+                        value="python",
+                        label="Language",
+                    ).classes("w-48")
+                    chonkie_chunk_size = ui.number(
+                        label="Chunk size (chars)", value=2048, min=128, max=16384,
+                    ).classes("w-40")
+                    chonkie_sample_select = ui.select(
+                        {k: k for k in _CHONKIE_SAMPLES} if _CHONKIE_SAMPLES else {"": "(no samples found)"},
+                        value="",
+                        label="Load sample file",
+                    ).classes("w-64")
+                    chonkie_run_btn = ui.button(
+                        "Run Comparison", color="primary",
+                    )
+
+                chonkie_code_input = ui.textarea(
+                    label="Paste source code here",
+                    placeholder="def hello():\n    print('world')\n\nclass Foo:\n    ...",
+                ).classes("w-full").props("rows=14 outlined")
+
+                def _on_sample_change(e):
+                    key = e.value if hasattr(e, "value") else e
+                    if key and key in _CHONKIE_SAMPLES:
+                        try:
+                            content = _CHONKIE_SAMPLES[key].read_text(
+                                encoding="utf-8", errors="replace",
+                            )
+                            chonkie_code_input.set_value(content)
+                            ext = _CHONKIE_SAMPLES[key].suffix
+                            lang_map = {
+                                ".py": "python", ".js": "javascript",
+                                ".ts": "typescript", ".java": "java",
+                                ".go": "go", ".cs": "csharp", ".kt": "kotlin",
+                                ".rs": "rust", ".cpp": "cpp", ".c": "c",
+                                ".rb": "ruby", ".pas": "pascal (Delphi)",
+                                ".dpr": "pascal (Delphi)", ".dfm": "pascal (Delphi)",
+                                ".rpg": "rpg", ".rpgle": "rpg",
+                                ".foc": "focus", ".nat": "natural",
+                                ".cbl": "cobol", ".cob": "cobol",
+                            }
+                            detected = lang_map.get(ext, "auto")
+                            chonkie_lang_select.set_value(detected)
+                        except Exception:
+                            pass
+
+                chonkie_sample_select.on_value_change(_on_sample_change)
+
+                chonkie_status = ui.markdown("")
+
+                with ui.row().classes("w-full gap-4"):
+                    with ui.column().classes("flex-1"):
+                        ui.label("1. Regex Chunker").classes(
+                            "text-lg font-bold text-blue-600"
+                        )
+                        regex_summary = ui.markdown("")
+                        regex_chunks_container = ui.column().classes("w-full gap-2")
+                    with ui.column().classes("flex-1"):
+                        ui.label("2. Chonkie AST Chunker").classes(
+                            "text-lg font-bold text-green-600"
+                        )
+                        chonkie_summary = ui.markdown("")
+                        chonkie_chunks_container = ui.column().classes("w-full gap-2")
+                    with ui.column().classes("flex-1"):
+                        ui.label("3. Structural Chunker").classes(
+                            "text-lg font-bold text-purple-600"
+                        )
+                        ui.markdown(
+                            "*Scope-aware block parser for RPG, FOCUS, Natural*"
+                        )
+                        structural_summary = ui.markdown("")
+                        structural_chunks_container = ui.column().classes("w-full gap-2")
+
+                _STRUCTURAL_LANGS = {"rpg", "rpgle", "focus", "natural"}
+
+                async def _on_run_chonkie_comparison():
+                    code = (chonkie_code_input.value or "").strip()
+                    if not code:
+                        chonkie_status.set_content(
+                            "**Please paste some code or select a sample file.**"
+                        )
+                        return
+
+                    chonkie_run_btn.disable()
+                    chonkie_status.set_content("*Running comparison...*")
+                    regex_chunks_container.clear()
+                    chonkie_chunks_container.clear()
+                    structural_chunks_container.clear()
+
+                    ui_language = chonkie_lang_select.value or "python"
+                    chunk_size = int(chonkie_chunk_size.value or 2048)
+
+                    _chonkie_lang_map = {
+                        "pascal (Delphi)": "pascal",
+                        "csharp": "c_sharp",
+                    }
+                    _ext_map = {
+                        "python": ".py", "javascript": ".js",
+                        "typescript": ".ts", "java": ".java",
+                        "go": ".go", "csharp": ".cs", "kotlin": ".kt",
+                        "rust": ".rs", "cpp": ".cpp", "c": ".c",
+                        "ruby": ".rb", "auto": ".py",
+                        "pascal (Delphi)": ".pas", "cobol": ".cbl",
+                        "scala": ".scala", "swift": ".swift", "php": ".php",
+                        "rpg": ".rpgle", "focus": ".foc", "natural": ".nat",
+                    }
+                    chonkie_language = _chonkie_lang_map.get(ui_language, ui_language)
+                    ext = _ext_map.get(ui_language, ".py")
+                    is_structural_lang = ui_language.lower() in _STRUCTURAL_LANGS
+
+                    # ── 1. Regex chunker ─────────────────────────────
+                    import tempfile
+                    from trustbot.indexing.chunker import chunk_file as regex_chunk_file
+
+                    with tempfile.TemporaryDirectory() as tmp:
+                        tmp_path = Path(tmp)
+                        tmp_file = tmp_path / f"sample{ext}"
+                        tmp_file.write_text(code, encoding="utf-8")
+                        regex_results = regex_chunk_file(tmp_file, tmp_path)
+
+                    # ── 2. Chonkie AST chunker ───────────────────────
+                    # Check tree-sitter support before attempting Chonkie
+                    _no_treesitter = {
+                        "rpg", "rpgle", "focus", "natural", "auto",
+                    }
+                    chonkie_results = []
+                    chonkie_error = ""
+                    if chonkie_language.lower() in _no_treesitter:
+                        chonkie_error = (
+                            f"No tree-sitter grammar for `{ui_language}`. "
+                            f"Use the **Structural Chunker** (column 3) instead."
+                        )
+                    else:
+                        try:
+                            from chonkie import CodeChunker
+
+                            chunker = CodeChunker(
+                                language=chonkie_language,
+                                tokenizer="character",
+                                chunk_size=chunk_size,
+                                include_nodes=False,
+                            )
+                            chonkie_results = chunker.chunk(code)
+                        except Exception as exc:
+                            logger.exception("Chonkie chunking failed")
+                            chonkie_error = str(exc)
+
+                    # ── 3. Structural block chunker ──────────────────
+                    structural_results = []
+                    structural_error = ""
+                    try:
+                        from trustbot.indexing.structural_chunker import (
+                            structural_chunk,
+                            get_supported_languages,
+                        )
+                        structural_results = structural_chunk(
+                            code, ui_language, chunk_size,
+                        )
+                    except Exception as exc:
+                        logger.exception("Structural chunking failed")
+                        structural_error = str(exc)
+
+                    # ── Render regex results ──────────────────────────
+                    regex_summary.set_content(
+                        f"**Chunks:** {len(regex_results)} | "
+                        f"**Method:** Regex pattern matching"
+                    )
+                    for idx, rc in enumerate(regex_results, 1):
+                        with regex_chunks_container:
+                            with ui.card().classes("w-full"):
+                                ui.label(
+                                    f"Chunk {idx}: {rc.function_name}"
+                                    f" (lines {rc.line_start}-{rc.line_end})"
+                                ).classes("font-bold text-sm text-blue-800")
+                                with ui.expansion(
+                                    f"Preview ({rc.line_end - rc.line_start + 1} lines)",
+                                    icon="code",
+                                ).classes("w-full"):
+                                    ui.code(rc.content).classes(
+                                        "w-full max-h-64 overflow-auto text-xs"
+                                    )
+
+                    # ── Render Chonkie results ────────────────────────
+                    if chonkie_error:
+                        chonkie_summary.set_content(
+                            f"**Error:** {chonkie_error}"
+                        )
+                    else:
+                        total_tokens = sum(c.token_count for c in chonkie_results)
+                        chonkie_summary.set_content(
+                            f"**Chunks:** {len(chonkie_results)} | "
+                            f"**Total tokens:** {total_tokens} | "
+                            f"**Method:** AST (tree-sitter)"
+                        )
+                        for idx, cc in enumerate(chonkie_results, 1):
+                            with chonkie_chunks_container:
+                                with ui.card().classes("w-full"):
+                                    ui.label(
+                                        f"Chunk {idx}: {cc.token_count} tokens "
+                                        f"(chars {cc.start_index}-{cc.end_index})"
+                                    ).classes("font-bold text-sm text-green-800")
+                                    with ui.expansion(
+                                        f"Preview ({cc.token_count} tokens)",
+                                        icon="code",
+                                    ).classes("w-full"):
+                                        ui.code(cc.text).classes(
+                                            "w-full max-h-64 overflow-auto text-xs"
+                                        )
+
+                    # ── Render structural results ─────────────────────
+                    if structural_error:
+                        structural_summary.set_content(
+                            f"**Error:** {structural_error}"
+                        )
+                    elif not structural_results:
+                        structural_summary.set_content(
+                            "**No blocks found** -- language may not have "
+                            "structural rules defined yet."
+                        )
+                    else:
+                        total_sc = sum(s.token_count for s in structural_results)
+                        structural_summary.set_content(
+                            f"**Chunks:** {len(structural_results)} | "
+                            f"**Total chars:** {total_sc} | "
+                            f"**Method:** Block-boundary scope parsing"
+                        )
+                        for idx, sc in enumerate(structural_results, 1):
+                            with structural_chunks_container:
+                                with ui.card().classes("w-full"):
+                                    ui.label(
+                                        f"Chunk {idx}: [{sc.block_type}] "
+                                        f"{sc.block_name} "
+                                        f"(lines {sc.line_start}-{sc.line_end})"
+                                    ).classes("font-bold text-sm text-purple-800")
+                                    with ui.expansion(
+                                        f"Preview ({sc.token_count} chars)",
+                                        icon="code",
+                                    ).classes("w-full"):
+                                        ui.code(sc.text).classes(
+                                            "w-full max-h-64 overflow-auto text-xs"
+                                        )
+
+                    # ── Comparison summary table ──────────────────────
+                    n_regex = len(regex_results)
+                    n_chonkie = len(chonkie_results) if not chonkie_error else 0
+                    n_structural = len(structural_results)
+
+                    avg_r = (
+                        sum(len(r.content) for r in regex_results) // max(n_regex, 1)
+                        if n_regex else "N/A"
+                    )
+                    avg_c = (
+                        sum(c.token_count for c in chonkie_results) // max(n_chonkie, 1)
+                        if n_chonkie else "N/A"
+                    )
+                    avg_s = (
+                        sum(s.token_count for s in structural_results) // max(n_structural, 1)
+                        if n_structural else "N/A"
+                    )
+
+                    has_ast = not chonkie_error and n_chonkie > 0
+                    best_for_lang = (
+                        "**Structural** (no AST grammar for this language)"
+                        if is_structural_lang else
+                        "**Chonkie AST** (tree-sitter grammar available)"
+                        if has_ast else "**Regex** (fallback)"
+                    )
+
+                    summary_lines = [
+                        "---",
+                        "### Comparison Summary",
+                        "",
+                        "| Metric | Regex | Chonkie (AST) | Structural |",
+                        "| --- | --- | --- | --- |",
+                        f"| Chunks produced | {n_regex} "
+                        f"| {n_chonkie if not chonkie_error else 'N/A'} "
+                        f"| {n_structural} |",
+                        f"| Avg chunk size (chars) | {avg_r} | {avg_c} | {avg_s} |",
+                        "| Parsing method | Regex | tree-sitter AST "
+                        "| Block-boundary scope |",
+                        "| Language support | ~15 (manual) | 165+ (auto) "
+                        "| RPG, FOCUS, Natural |",
+                        "| Structural awareness | No | Full AST "
+                        "| Block-level (open/close) |",
+                        "| Token counting | No | Yes | Yes (chars) |",
+                        "| Handles nesting | No | Yes | Yes |",
+                        "",
+                        f"**Recommended for `{ui_language}`:** {best_for_lang}",
+                    ]
+                    chonkie_status.set_content("\n".join(summary_lines))
+                    chonkie_run_btn.enable()
+
+                chonkie_run_btn.on_click(_on_run_chonkie_comparison)
