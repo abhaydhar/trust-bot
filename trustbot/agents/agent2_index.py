@@ -122,6 +122,49 @@ def _path_matches_prefix(file_path: str, prefix: str) -> bool:
     return normalized.upper().startswith(prefix.upper())
 
 
+def _resolve_index_file(
+    neo4j_file: str,
+    func_key: str,
+    func_to_files: dict[str, list[str]],
+) -> str:
+    """
+    Resolve a Neo4j file path to the matching index file path for a function.
+
+    Neo4j paths are absolute (e.g. /mnt/.../fChoisirUnTarif.pas).
+    Index paths are relative (e.g. src/fChoisirUnTarif.pas).
+    Match by filename (case-insensitive), then by stem if no exact match.
+
+    Returns the resolved index path, or "" if no match found.
+    """
+    if not neo4j_file:
+        return ""
+
+    candidate_files = func_to_files.get(func_key, [])
+    if not candidate_files:
+        return ""
+    if len(candidate_files) == 1:
+        return candidate_files[0]
+
+    neo4j_norm = neo4j_file.replace("\\", "/").strip()
+    neo4j_filename = neo4j_norm.rsplit("/", 1)[-1].upper()
+
+    for fp in candidate_files:
+        fp_norm = fp.replace("\\", "/")
+        fp_filename = fp_norm.rsplit("/", 1)[-1].upper()
+        if fp_filename == neo4j_filename:
+            return fp
+
+    neo4j_stem = neo4j_filename.rsplit(".", 1)[0] if "." in neo4j_filename else neo4j_filename
+    for fp in candidate_files:
+        fp_norm = fp.replace("\\", "/")
+        fp_filename = fp_norm.rsplit("/", 1)[-1].upper()
+        fp_stem = fp_filename.rsplit(".", 1)[0] if "." in fp_filename else fp_filename
+        if fp_stem == neo4j_stem:
+            return fp
+
+    return ""
+
+
 class Agent2IndexBuilder:
     """
     Agent that builds a call graph from the indexed codebase.
@@ -221,15 +264,20 @@ class Agent2IndexBuilder:
         # Build function lookups scoped to the same project.
         # We index by BOTH bare name and "Class.Method" qualified name so that
         # lookups from Neo4j (which may use either form) succeed.
+        # func_to_files maps name -> [file_paths] to handle name collisions
+        # (e.g. Button1Click in both Unit1.pas and uMainPourAffichage.pas).
         func_to_file: dict[str, str] = {}
+        func_to_files: dict[str, list[str]] = {}
         func_to_class: dict[str, str] = {}
         for fn, fp, cn in all_functions:
             if project_prefix and not _path_matches_prefix(fp, project_prefix):
                 continue
             key = fn.upper().strip()
             func_to_file[key] = fp
+            func_to_files.setdefault(key, [])
+            if fp not in func_to_files[key]:
+                func_to_files[key].append(fp)
             func_to_class[key] = cn or ""
-            # Also register under "CLASS.FUNC" so lookups from Neo4j work
             if cn:
                 qualified_key = f"{cn.upper().strip()}.{key}"
                 if qualified_key not in func_to_file:
@@ -294,6 +342,18 @@ class Agent2IndexBuilder:
 
         root_outgoing = len(edge_map.get(root_key, []))
 
+        # Resolve root_file (Neo4j absolute path) to the matching index
+        # relative path.  This disambiguates when the same function name
+        # exists in multiple files (FormCreate, DataModuleCreate, __init__, etc.).
+        resolved_root_file = _resolve_index_file(
+            root_file, root_key, func_to_files,
+        )
+        if resolved_root_file:
+            logger.info(
+                "Resolved root_file '%s' → index path '%s' for function '%s'",
+                root_file, resolved_root_file, root_function,
+            )
+
         if not root_in_index:
             logger.warning(
                 "Root function '%s' NOT FOUND in index (%d functions). "
@@ -320,6 +380,7 @@ class Agent2IndexBuilder:
             visited,
             depth=1,
             project_prefix=project_prefix,
+            expected_file=resolved_root_file,
         )
 
         # If primary traversal found nothing and we have class members, traverse
@@ -336,6 +397,10 @@ class Agent2IndexBuilder:
                     (fn for fn, _, _ in all_functions if fn.upper().strip() == member_key),
                     member_key,
                 )
+                # Resolve each member's file from the root_file hint
+                member_file = _resolve_index_file(
+                    root_file, member_key, func_to_files,
+                )
                 self._traverse(
                     member_name,
                     edge_map,
@@ -346,6 +411,7 @@ class Agent2IndexBuilder:
                     visited,
                     depth=1,
                     project_prefix=project_prefix,
+                    expected_file=member_file,
                 )
 
         sample_index_funcs = sorted(func_to_file.keys())[:15]
@@ -400,6 +466,7 @@ class Agent2IndexBuilder:
         depth: int,
         max_depth: int = 50,
         project_prefix: str = "",
+        expected_file: str = "",
     ) -> None:
         if depth > max_depth:
             return
@@ -409,26 +476,39 @@ class Agent2IndexBuilder:
             return
         visited.add(key)
 
-        caller_file = func_to_file.get(key, "")
+        caller_file = expected_file or func_to_file.get(key, "")
         caller_class = func_to_class.get(key, "")
 
         outgoing = edge_map.get(key, [])
+
+        # When the same function name exists in multiple files (e.g.
+        # Button1Click in Unit1.pas AND uMainPourAffichage.pas), filter
+        # outgoing edges to only those whose caller_file matches.  This
+        # prevents cross-file contamination in the call graph.
+        #
+        # IMPORTANT: always apply the filter when caller_file is known —
+        # an empty result means the function has zero outgoing calls from
+        # this file, which is correct (do NOT fall back to the unfiltered
+        # list, as that would pull in edges from a different file).
+        if caller_file:
+            caller_norm = caller_file.replace("\\", "/").upper()
+            outgoing = [
+                e for e in outgoing
+                if not e["caller_file"]
+                or e["caller_file"].replace("\\", "/").upper() == caller_norm
+            ]
+
         callee_order = 0
         for e in outgoing:
             callee_name = e["callee_name"]
             callee_key = callee_name.upper().strip()
 
-            # Skip self-referencing edges (forward decl -> implementation of same func)
-            if callee_key == key:
-                continue
+            # Prefer the edge's callee_file (derived from the chunk_id, always
+            # accurate) over func_to_file which can be ambiguous when the same
+            # function name exists in multiple files (e.g. Button1Click).
+            callee_file = e.get("callee_file", "") or func_to_file.get(callee_key, "")
+            callee_class = e.get("callee_class", "") or func_to_class.get(callee_key, "")
 
-            # Prefer project-scoped func_to_file over the edge's callee_file,
-            # since the edge may reference a cross-project file due to name
-            # collisions at index time.
-            callee_file = func_to_file.get(callee_key, "") or e.get("callee_file", "")
-            callee_class = func_to_class.get(callee_key, "") or e.get("callee_class", "")
-
-            # If the resolved callee file is outside our project, skip it
             if project_prefix and callee_file and not _path_matches_prefix(callee_file, project_prefix):
                 if callee_name not in unresolved:
                     unresolved.append(callee_name)
@@ -454,6 +534,10 @@ class Agent2IndexBuilder:
                 )
             )
 
+            # Self-recursive call: record the edge but don't recurse
+            if callee_key == key:
+                continue
+
             self._traverse(
                 callee_name,
                 edge_map,
@@ -465,6 +549,7 @@ class Agent2IndexBuilder:
                 depth + 1,
                 max_depth,
                 project_prefix,
+                expected_file=callee_file,
             )
 
     def _get_all_functions(self) -> list[tuple[str, str]]:

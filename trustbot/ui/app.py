@@ -133,9 +133,28 @@ async def _index_local_folder(folder_path: str, progress_cb=None):
         return f"Path is not a directory: `{folder}`"
 
     try:
+        # --- Agent 0: Language Intelligence (auto-detect & generate profiles) ---
         if progress_cb:
-            progress_cb(0.05, "Scanning local folder...")
+            progress_cb(0.02, "Agent 0: Detecting languages...")
 
+        from trustbot.agents.agent0_language import Agent0LanguageProfiler
+        from trustbot.indexing.chunker import set_language_profiles
+
+        agent0 = Agent0LanguageProfiler(folder)
+        profiles = await agent0.run(
+            progress_callback=lambda _, msg: progress_cb(0.05, f"Agent 0: {msg}") if progress_cb else None,
+        )
+
+        lang_summary = ", ".join(f"{k} ({p.source_file_count} files)" for k, p in profiles.items())
+        logger.info("Agent 0 complete: %s", lang_summary)
+
+        if profiles:
+            set_language_profiles(profiles)
+
+        if progress_cb:
+            progress_cb(0.15, f"Detected {len(profiles)} language(s), chunking...")
+
+        # --- Chunking & call graph building ---
         from trustbot.indexing.chunker import chunk_codebase
         from trustbot.indexing.call_graph_builder import build_call_graph_from_chunks
 
@@ -151,9 +170,10 @@ async def _index_local_folder(folder_path: str, progress_cb=None):
 
         function_count = len([c for c in chunks if c.function_name])
         if progress_cb:
-            progress_cb(0.55, f"Building call graph from {function_count} functions...")
+            progress_cb(0.55, f"Building call graph from {function_count} functions (LLM extraction)...")
 
-        edges = await asyncio.to_thread(build_call_graph_from_chunks, chunks)
+        cache_conn = code_idx.get_cache_conn()
+        edges = await build_call_graph_from_chunks(chunks, cache_conn=cache_conn)
 
         edge_tuples = [(e.from_chunk, e.to_chunk, e.confidence) for e in edges]
         code_idx.store_edges(edge_tuples)
@@ -170,10 +190,20 @@ async def _index_local_folder(folder_path: str, progress_cb=None):
         if progress_cb:
             progress_cb(1.0, "Done!")
 
+        profile_lines = "\n".join(
+            f"  - **{lang}**: {p.source_file_count} files, "
+            f"{len(p.function_def_patterns)} func patterns, "
+            f"{'%.0f' % (p.validation_coverage * 100)}% coverage"
+            for lang, p in profiles.items()
+        )
+
         return (
             f"## Indexing Complete!\n\n"
             f"**Source**: Local Folder\n"
-            f"**Path**: `{folder}`\n"
+            f"**Path**: `{folder}`\n\n"
+            f"### Agent 0 — Language Profiles\n"
+            f"{profile_lines}\n\n"
+            f"### Indexing Results\n"
             f"**Files processed**: {files_count}\n"
             f"**Code chunks created**: {len(chunks)}\n"
             f"**Functions indexed**: {function_count}\n"
@@ -287,6 +317,7 @@ def _format_3agent_summary(project_id: int, run_id: int, results: list[dict]) ->
     total_confirmed = sum(len(r["result"].confirmed_edges) for r in results)
     total_phantom = sum(len(r["result"].phantom_edges) for r in results)
     total_missing = sum(len(r["result"].missing_edges) for r in results)
+    total_coverage_gaps = sum(len(r["result"].codebase_extra_edges) for r in results)
     total_edges = total_confirmed + total_phantom + total_missing
 
     avg_trust = 0.0
@@ -308,6 +339,7 @@ def _format_3agent_summary(project_id: int, run_id: int, results: list[dict]) ->
         f"  - Confirmed: {total_confirmed}",
         f"  - Phantom (Neo4j only): {total_phantom}",
         f"  - Missing (Index only): {total_missing}",
+        f"  - Codebase coverage gaps: {total_coverage_gaps}",
         "",
     ]
 
@@ -470,6 +502,7 @@ def _format_3agent_report(project_id: int, run_id: int, results: list[dict]) -> 
         lines.append(f"| -- Name-only match | {meta.get('match_name_only', '-')} |")
         lines.append(f"| Phantom (Neo4j only) | {len(res.phantom_edges)} |")
         lines.append(f"| Missing (Index only) | {len(res.missing_edges)} |")
+        lines.append(f"| Codebase coverage gaps | {len(res.codebase_extra_edges)} |")
         lines.append("")
 
         if res.confirmed_edges:
@@ -522,6 +555,30 @@ def _format_3agent_report(project_id: int, run_id: int, results: list[dict]) -> 
             lines.append("")
             for u in res.unresolved_callees[:20]:
                 lines.append(f"- `{u}`")
+            lines.append("")
+
+        if res.codebase_extra_edges:
+            lines += [
+                "### Codebase Coverage Gaps",
+                "",
+                "Edges found in the indexed codebase for functions in the Neo4j "
+                "call tree, but **not present in Neo4j**. These are real calls "
+                "in the code that Neo4j may be missing.",
+                "",
+                "| # | Caller | Callee | Caller File | Callee File | Confidence |",
+                "|---|--------|--------|-------------|-------------|------------|",
+            ]
+            for i, e in enumerate(res.codebase_extra_edges[:30], 1):
+                cr_file = (e.caller_file or "").replace("\\", "/").rsplit("/", 1)[-1] if e.caller_file else "-"
+                ce_file = (e.callee_file or "").replace("\\", "/").rsplit("/", 1)[-1] if e.callee_file else "-"
+                lines.append(
+                    f"| {i} | `{e.caller}` | `{e.callee}` "
+                    f"| {cr_file} | {ce_file} | {e.trust_score:.2f} |"
+                )
+            if len(res.codebase_extra_edges) > 30:
+                lines.append(
+                    f"| ... | +{len(res.codebase_extra_edges) - 30} more | | | | |"
+                )
             lines.append("")
 
         # Deeper analysis for flows requiring attention (why edges don't match, fix suggestions)
@@ -1103,7 +1160,10 @@ def create_ui():
                     idx_status.set_content("Indexing...")
 
                     def _progress(pct, desc):
-                        idx_progress.set_value(pct)
+                        try:
+                            idx_progress.set_value(pct)
+                        except RuntimeError:
+                            pass
 
                     try:
                         if source_radio.value == "Local Folder":
@@ -1117,9 +1177,12 @@ def create_ui():
                     except Exception as exc:
                         result = f"Error: {exc}"
 
-                    idx_progress.set_value(1.0)
-                    idx_status.set_content(result)
-                    index_btn.enable()
+                    try:
+                        idx_progress.set_value(1.0)
+                        idx_status.set_content(result)
+                        index_btn.enable()
+                    except RuntimeError:
+                        pass
 
                 index_btn.on_click(_on_index_click)
 
@@ -2576,19 +2639,13 @@ def create_ui():
                             )
                             chonkie_code_input.set_value(content)
                             ext = _CHONKIE_SAMPLES[key].suffix
-                            lang_map = {
-                                ".py": "python", ".js": "javascript",
-                                ".ts": "typescript", ".java": "java",
-                                ".go": "go", ".cs": "csharp", ".kt": "kotlin",
-                                ".rs": "rust", ".cpp": "cpp", ".c": "c",
-                                ".rb": "ruby", ".pas": "pascal (Delphi)",
-                                ".dpr": "pascal (Delphi)", ".dfm": "pascal (Delphi)",
-                                ".rpg": "rpg", ".rpgle": "rpg",
-                                ".foc": "focus", ".nat": "natural",
-                                ".cbl": "cobol", ".cob": "cobol",
+                            from trustbot.indexing.chunker import get_language_for_ext
+                            detected_lang = get_language_for_ext(ext)
+                            _ui_name_map = {
+                                "delphi": "pascal (Delphi)",
                             }
-                            detected = lang_map.get(ext, "auto")
-                            chonkie_lang_select.set_value(detected)
+                            ui_name = _ui_name_map.get(detected_lang, detected_lang)
+                            chonkie_lang_select.set_value(ui_name if ui_name != "unknown" else "auto")
                         except Exception:
                             pass
 
@@ -2619,7 +2676,8 @@ def create_ui():
                         structural_summary = ui.markdown("")
                         structural_chunks_container = ui.column().classes("w-full gap-2")
 
-                _STRUCTURAL_LANGS = {"rpg", "rpgle", "focus", "natural"}
+                from trustbot.indexing.structural_chunker import get_supported_languages as _get_struct_langs
+                _STRUCTURAL_LANGS = set(_get_struct_langs())
 
                 async def _on_run_chonkie_comparison():
                     code = (chonkie_code_input.value or "").strip()

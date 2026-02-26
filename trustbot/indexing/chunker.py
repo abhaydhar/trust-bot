@@ -1,6 +1,10 @@
 """
 Text-based code chunker that splits source files into function-level chunks
-using regex patterns. No AST parser required.
+using regex patterns.  No AST parser required.
+
+When Agent 0 language profiles are available, patterns/extensions/rules are
+read from the profiles.  Otherwise, built-in seed profiles are used as
+fallback — preserving full backward compatibility.
 """
 
 from __future__ import annotations
@@ -10,110 +14,98 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trustbot.models.language_profile import LanguageProfile
 
 logger = logging.getLogger("trustbot.indexing.chunker")
 
 IGNORED_DIRS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
     "dist", "build", ".idea", ".vs", "bin", "obj", "target",
+    ".trustbot",
 }
 
-CODE_EXTENSIONS = {
-    ".py", ".java", ".js", ".ts", ".jsx", ".tsx", ".cs",
-    ".go", ".kt", ".rb", ".rs", ".cpp", ".c", ".h", ".hpp",
-    ".scala", ".swift", ".php",
-    # Delphi/Pascal
-    ".pas", ".dpr", ".dfm", ".inc",
-    # Legacy/Mainframe
-    ".cbl", ".cob",  # COBOL
-    ".rpg", ".rpgle",  # RPG
-    ".nat",  # Natural
-    ".foc",  # FOCUS
-}
+# ── Active language profiles (set by Agent 0 or seed fallback) ───────────
 
-LANGUAGE_MAP = {
-    ".py": "python", ".java": "java", ".js": "javascript", ".ts": "typescript",
-    ".jsx": "javascript", ".tsx": "typescript", ".cs": "csharp", ".go": "go",
-    ".kt": "kotlin", ".rb": "ruby", ".rs": "rust", ".cpp": "cpp", ".c": "c",
-    ".h": "c", ".hpp": "cpp", ".scala": "scala", ".swift": "swift", ".php": "php",
-    # Delphi/Pascal
-    ".pas": "delphi", ".dpr": "delphi", ".dfm": "delphi", ".inc": "delphi",
-    # Legacy/Mainframe
-    ".cbl": "cobol", ".cob": "cobol",
-    ".rpg": "rpg", ".rpgle": "rpg",
-    ".nat": "natural",
-    ".foc": "focus",
-}
+_active_profiles: dict[str, "LanguageProfile"] = {}
+_ext_to_lang: dict[str, str] = {}
+_code_extensions: set[str] = set()
 
-# Regex patterns to find function/method definitions per language.
-# Named group "name" captures the function name.
-FUNC_DEF_PATTERNS: dict[str, list[re.Pattern]] = {
-    "python": [
-        re.compile(r"^(?P<indent>[ \t]*)(?:async\s+)?def\s+(?P<name>\w+)\s*\(", re.MULTILINE),
-        re.compile(r"^(?P<indent>[ \t]*)class\s+(?P<name>\w+)", re.MULTILINE),
-    ],
-    "java": [
-        re.compile(
-            r"(?:(?:public|private|protected|static|final|abstract|synchronized)\s+)*"
-            r"[\w<>\[\],\s]+\s+(?P<name>\w+)\s*\([^)]*\)\s*(?:throws\s+[\w,\s]+)?\s*\{",
-            re.MULTILINE,
-        ),
-    ],
-    "javascript": [
-        re.compile(r"(?:async\s+)?function\s+(?P<name>\w+)\s*\(", re.MULTILINE),
-        re.compile(r"(?:const|let|var)\s+(?P<name>\w+)\s*=\s*(?:async\s+)?\(", re.MULTILINE),
-        re.compile(r"(?:const|let|var)\s+(?P<name>\w+)\s*=\s*(?:async\s+)?function", re.MULTILINE),
-        re.compile(r"class\s+(?P<name>\w+)", re.MULTILINE),
-    ],
-    "typescript": [
-        re.compile(r"(?:async\s+)?function\s+(?P<name>\w+)\s*[\(<]", re.MULTILINE),
-        re.compile(r"(?:export\s+)?(?:const|let|var)\s+(?P<name>\w+)\s*=\s*(?:async\s+)?\(", re.MULTILINE),
-        re.compile(r"(?:export\s+)?class\s+(?P<name>\w+)", re.MULTILINE),
-        re.compile(r"(?:export\s+)?interface\s+(?P<name>\w+)", re.MULTILINE),
-    ],
-    "delphi": [
-        # Delphi implementation: procedure TClassName.MethodName / function TClassName.MethodName
-        # The optional (?:(\w+)\.)? captures the class prefix so "name" gets the method name.
-        re.compile(
-            r"^\s*(?:function|procedure)\s+(?:(?P<delphi_class>\w+)\.)?(?P<name>\w+)",
-            re.MULTILINE | re.IGNORECASE,
-        ),
-        re.compile(
-            r"^\s*(?:constructor|destructor)\s+(?:(?P<delphi_class>\w+)\.)?(?P<name>\w+)",
-            re.MULTILINE | re.IGNORECASE,
-        ),
-    ],
-    "cobol": [
-        # COBOL paragraph/section patterns
-        re.compile(r"^\s*(?P<name>[A-Z0-9\-]+)\s+(?:SECTION|DIVISION)\.", re.MULTILINE),
-        re.compile(r"^\s*(?P<name>[A-Z0-9\-]+)\.\s*$", re.MULTILINE),
-    ],
-    "rpg": [
-        # RPG procedure patterns
-        re.compile(r"^\s*DCL-PROC\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
-        re.compile(r"^\s*BEGSR\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
-    ],
-    "natural": [
-        # Natural subroutine patterns
-        re.compile(r"^\s*DEFINE\s+(?:SUBROUTINE|FUNCTION)\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE),
-    ],
-    "csharp": [
-        re.compile(
-            r"(?:(?:public|private|protected|internal|static|virtual|override|abstract|async)\s+)*"
-            r"[\w<>\[\]]+\s+(?P<name>\w+)\s*\(",
-            re.MULTILINE,
-        ),
-        re.compile(r"class\s+(?P<name>\w+)", re.MULTILINE),
-    ],
-    "go": [
-        re.compile(r"func\s+(?:\(\w+\s+\*?\w+\)\s+)?(?P<name>\w+)\s*\(", re.MULTILINE),
-    ],
-    "kotlin": [
-        re.compile(r"(?:suspend\s+)?fun\s+(?P<name>\w+)\s*[\(<]", re.MULTILINE),
-        re.compile(r"class\s+(?P<name>\w+)", re.MULTILINE),
-    ],
-}
 
+def set_language_profiles(profiles: dict[str, "LanguageProfile"]) -> None:
+    """Install Agent 0 profiles for use by the chunker.
+
+    Called once at index time after Agent 0 completes.  Rebuilds the
+    extension-to-language map and recognised-extensions set.
+    """
+    global _active_profiles, _ext_to_lang, _code_extensions
+    _active_profiles = dict(profiles)
+    _ext_to_lang = {}
+    _code_extensions = set()
+    for lang, profile in profiles.items():
+        for ext in profile.file_extensions:
+            if ext == "":
+                _ext_to_lang[""] = lang
+                _code_extensions.add("")
+            else:
+                ext_lower = ext.lower() if ext.startswith(".") else f".{ext}".lower()
+                _ext_to_lang[ext_lower] = lang
+                _code_extensions.add(ext_lower)
+    logger.info(
+        "Chunker profiles loaded: %d languages, %d extensions (extensionless=%s)",
+        len(profiles), len(_code_extensions), "" in _code_extensions,
+    )
+
+
+def _ensure_profiles_loaded() -> None:
+    """Lazy-load seed profiles if Agent 0 hasn't run yet."""
+    if _active_profiles:
+        return
+    from trustbot.agents.agent0_seed_profiles import get_all_seed_profiles
+    set_language_profiles(get_all_seed_profiles())
+
+
+def get_language_for_ext(ext: str) -> str:
+    """Return the language name for a file extension."""
+    _ensure_profiles_loaded()
+    return _ext_to_lang.get(ext.lower(), "unknown")
+
+
+def get_code_extensions() -> set[str]:
+    """Return the set of all recognised source-code file extensions."""
+    _ensure_profiles_loaded()
+    return set(_code_extensions)
+
+
+def _get_profile(language: str) -> "LanguageProfile | None":
+    """Get the active profile for a language."""
+    _ensure_profiles_loaded()
+    return _active_profiles.get(language)
+
+
+def _compile_patterns(profile: "LanguageProfile") -> list[re.Pattern]:
+    """Compile function_def + class_def regex patterns from a profile."""
+    compiled: list[re.Pattern] = []
+    for pat_str in profile.function_def_patterns + profile.class_def_patterns:
+        if "(?P<name>" not in pat_str and "(?P<name>" not in pat_str.replace(" ", ""):
+            logger.warning(
+                "Skipping pattern without (?P<name>...) group in %s: %s",
+                profile.language, pat_str,
+            )
+            continue
+        try:
+            compiled.append(re.compile(pat_str, re.MULTILINE | re.IGNORECASE))
+        except re.error as e:
+            logger.warning(
+                "Invalid regex in profile %s: %s — %s",
+                profile.language, pat_str, e,
+            )
+    return compiled
+
+
+# ── Data model ───────────────────────────────────────────────────────────
 
 @dataclass
 class CodeChunk:
@@ -134,32 +126,17 @@ class CodeChunk:
             self.chunk_id = f"{self.file_path}::{self.class_name}::{self.function_name}"
 
 
+# ── Special-file parsers ────────────────────────────────────────────────
+
 def _parse_dfm_file(content: str, rel_path: str) -> list[CodeChunk]:
-    """
-    Parse a Delphi .dfm form file to extract:
-    - A chunk for each top-level form object (e.g., TForm1)
-    - Event handler bindings stored in chunk.metadata["event_handlers"]
-
-    DFM format example:
-        object Form1: TForm1
-          OnCreate = FormCreate
-          object Button1: TButton
-            OnClick = Button1Click
-          end
-        end
-
-    Each form produces a CodeChunk whose metadata contains the event bindings,
-    which the call graph builder uses to create form-to-handler edges.
-    """
+    """Parse a Delphi .dfm form file to extract form objects and event handlers."""
     chunks: list[CodeChunk] = []
     lines = content.splitlines()
 
-    # Match top-level "object Name: TClassName"
     form_pattern = re.compile(
         r"^\s*object\s+(?P<name>\w+)\s*:\s*(?P<class>\w+)",
         re.IGNORECASE,
     )
-    # Match "OnXxx = HandlerName" event bindings
     event_pattern = re.compile(
         r"^\s*On\w+\s*=\s*(?P<handler>\w+)",
         re.IGNORECASE,
@@ -183,13 +160,13 @@ def _parse_dfm_file(content: str, rel_path: str) -> list[CodeChunk]:
             depth = 1
         elif stripped.lower().startswith("object ") and depth > 0:
             depth += 1
-            # Also check events on nested objects
             em = event_pattern.match(stripped)
             if em:
                 event_handlers.append(em.group("handler"))
         elif stripped.lower() == "end" and depth > 0:
             depth -= 1
             if depth == 0 and current_form_name:
+                unique_handlers = list(dict.fromkeys(event_handlers))
                 chunks.append(CodeChunk(
                     file_path=rel_path,
                     language="delphi",
@@ -198,7 +175,7 @@ def _parse_dfm_file(content: str, rel_path: str) -> list[CodeChunk]:
                     line_start=current_form_start,
                     line_end=i,
                     content="\n".join(lines[current_form_start - 1:i]),
-                    metadata={"event_handlers": event_handlers, "is_dfm_form": True},
+                    metadata={"event_handlers": unique_handlers, "is_dfm_form": True},
                 ))
                 current_form_name = ""
         else:
@@ -209,36 +186,65 @@ def _parse_dfm_file(content: str, rel_path: str) -> list[CodeChunk]:
     return chunks
 
 
+def _parse_special_file(
+    content: str,
+    rel_path: str,
+    language: str,
+    profile: "LanguageProfile",
+    ext: str,
+) -> list[CodeChunk] | None:
+    """Dispatch to the correct special-file parser based on profile config.
+
+    Returns None if no special-file config matches, meaning normal chunking
+    should be used.
+    """
+    for sf in profile.special_file_types:
+        if sf.extension.lower() == ext.lower():
+            if sf.parser_type == "dfm_form":
+                return _parse_dfm_file(content, rel_path)
+            logger.warning(
+                "Unknown special file parser_type '%s' for %s",
+                sf.parser_type, ext,
+            )
+    return None
+
+
+# ── Core chunking ────────────────────────────────────────────────────────
+
 def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
-    """
-    Split a single source file into function-level code chunks.
-    Falls back to file-level chunks if no functions are detected.
-    """
+    """Split a single source file into function-level code chunks."""
+    _ensure_profiles_loaded()
+
     try:
         content = file_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
 
-    ext = file_path.suffix
-    language = LANGUAGE_MAP.get(ext, "unknown")
+    ext = file_path.suffix.lower()
+    language = _ext_to_lang.get(ext, "unknown")
     rel_path = str(file_path.relative_to(root)).replace("\\", "/")
     lines = content.splitlines()
 
     if not lines:
         return []
 
-    # .dfm files need special parsing (declarative form definitions)
-    if ext.lower() == ".dfm":
+    profile = _get_profile(language)
+
+    if profile:
+        special = _parse_special_file(content, rel_path, language, profile, ext)
+        if special is not None:
+            return special
+    elif ext.lower() == ".dfm":
         return _parse_dfm_file(content, rel_path)
 
-    patterns = FUNC_DEF_PATTERNS.get(language, [])
+    patterns = _compile_patterns(profile) if profile else []
     if not patterns:
-        # Unsupported language — return the whole file as a single chunk
+        fname = file_path.stem if file_path.suffix else file_path.name
         return [
             CodeChunk(
                 file_path=rel_path,
                 language=language,
-                function_name="<module>",
+                function_name=fname if fname else "<module>",
                 class_name="",
                 line_start=1,
                 line_end=len(lines),
@@ -246,31 +252,53 @@ def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
             )
         ]
 
-    # Find all function/class definition positions
-    # Each entry: (line_num, name, kind, explicit_class)
+    class_prefix_group = (
+        profile.named_regex_groups.get("class_prefix", "")
+        if profile else ""
+    )
+
     definitions: list[tuple[int, str, str, str]] = []
     for pattern in patterns:
         for match in pattern.finditer(content):
-            name = match.group("name")
-            line_num = content[:match.start()].count("\n") + 1
-            indent = match.groupdict().get("indent", "")
-            kind = "class" if "class" in match.group(0).lower().split() else "function"
-            # Delphi: extract explicit class from "TClassName.MethodName" patterns
-            explicit_class = ""
             try:
-                explicit_class = match.group("delphi_class") or ""
+                name = match.group("name")
             except IndexError:
-                pass
+                continue
+            if not name:
+                continue
+            line_num = content[:match.start()].count("\n") + 1
+            kind = "class" if "class" in match.group(0).lower().split() else "function"
+            explicit_class = ""
+            if class_prefix_group:
+                try:
+                    explicit_class = match.group(class_prefix_group) or ""
+                except (IndexError, re.error):
+                    pass
             definitions.append((line_num, name, kind, explicit_class))
 
     definitions.sort(key=lambda d: d[0])
 
+    if profile and profile.forward_declaration_rules:
+        fwd = profile.forward_declaration_rules
+        if fwd.keyword and fwd.strategy == "discard_before_keyword_unless_class_prefix":
+            impl_line: int | None = None
+            for idx, line_text in enumerate(lines, 1):
+                if line_text.strip().lower() == fwd.keyword.lower():
+                    impl_line = idx
+                    break
+            if impl_line is not None:
+                definitions = [
+                    d for d in definitions
+                    if d[0] > impl_line or d[3]
+                ]
+
     if not definitions:
+        fname = file_path.stem if file_path.suffix else file_path.name
         return [
             CodeChunk(
                 file_path=rel_path,
                 language=language,
-                function_name="<module>",
+                function_name=fname if fname else "<module>",
                 class_name="",
                 line_start=1,
                 line_end=len(lines),
@@ -281,25 +309,42 @@ def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
     chunks: list[CodeChunk] = []
     current_class = ""
 
+    # Preamble chunk: code before the first definition (main program body,
+    # module-level code, etc.).  Named after the file so it appears in the
+    # index as a callable entry point.  Generic — benefits any language.
+    if definitions[0][0] > 1:
+        preamble_end = definitions[0][0] - 1
+        while preamble_end > 0 and not lines[preamble_end - 1].strip():
+            preamble_end -= 1
+        if preamble_end > 0:
+            fname = file_path.stem if file_path.suffix else file_path.name
+            chunks.append(
+                CodeChunk(
+                    file_path=rel_path,
+                    language=language,
+                    function_name=fname if fname else "<module>",
+                    class_name="",
+                    line_start=1,
+                    line_end=preamble_end,
+                    content="\n".join(lines[:preamble_end]),
+                )
+            )
+
     for i, (line_num, name, kind, explicit_class) in enumerate(definitions):
         if kind == "class":
             current_class = name
 
-        # Chunk extends from this definition to the next one (or EOF)
         start = line_num
         if i + 1 < len(definitions):
             end = definitions[i + 1][0] - 1
         else:
             end = len(lines)
 
-        # Trim trailing blank lines
         while end > start and not lines[end - 1].strip():
             end -= 1
 
         chunk_content = "\n".join(lines[start - 1 : end])
 
-        # Use explicit class (e.g. TfrmMain from "procedure TfrmMain.MethodName")
-        # falling back to the current_class from class definitions
         if explicit_class:
             class_name = explicit_class
         elif kind == "function":
@@ -323,21 +368,27 @@ def chunk_file(file_path: Path, root: Path) -> list[CodeChunk]:
 
 
 def chunk_codebase(root: Path) -> list[CodeChunk]:
-    """Walk the codebase and chunk all recognized source files."""
+    """Walk the codebase and chunk all recognised source files."""
+    _ensure_profiles_loaded()
     root = root.resolve()
     all_chunks: list[CodeChunk] = []
+    seen_ids: set[str] = set()
     file_count = 0
+    extensions = get_code_extensions()
 
     for dir_path, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
         for filename in files:
-            ext = os.path.splitext(filename)[1]
-            if ext not in CODE_EXTENSIONS:
+            ext = os.path.splitext(filename)[1].lower()
+            if ext not in extensions:
                 continue
             file_path = Path(dir_path) / filename
             chunks = chunk_file(file_path, root)
-            all_chunks.extend(chunks)
+            for chunk in chunks:
+                if chunk.chunk_id not in seen_ids:
+                    seen_ids.add(chunk.chunk_id)
+                    all_chunks.append(chunk)
             file_count += 1
 
-    logger.info("Chunked %d files into %d chunks", file_count, len(all_chunks))
+    logger.info("Chunked %d files into %d unique chunks", file_count, len(all_chunks))
     return all_chunks

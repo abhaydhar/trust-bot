@@ -31,7 +31,12 @@ import logging
 
 from trustbot.config import settings
 from trustbot.index.code_index import CodeIndex
-from trustbot.models.agentic import CallGraphOutput, VerificationResult
+from trustbot.models.agentic import (
+    CallGraphOutput,
+    EdgeClassification,
+    VerificationResult,
+    VerifiedEdge,
+)
 from trustbot.tools.neo4j_tool import Neo4jTool
 
 logger = logging.getLogger("trustbot.agents.pipeline")
@@ -191,17 +196,115 @@ class ValidationPipeline:
         index_norm = self._normalizer.normalize(index_graph)
         result = self._verifier.verify(neo4j_norm, index_norm)
 
+        # --- Codebase Coverage Gaps ---
+        # For every function in Agent 1's tree, check if the codebase index
+        # has outgoing edges that Neo4j doesn't.  These are flagged as
+        # "coverage gaps" — real calls in the code that Neo4j is missing.
+        if self._code_index is not None:
+            result.codebase_extra_edges = self._find_codebase_coverage_gaps(
+                neo4j_graph, index_graph,
+            )
+            if result.codebase_extra_edges:
+                logger.info(
+                    "Found %d codebase coverage gaps (edges in code but not in Neo4j)",
+                    len(result.codebase_extra_edges),
+                )
+
         report_md = self._reporter.generate_markdown(result)
 
         logger.info(
-            "Agent 3 complete: %d confirmed, %d phantom, %d missing (trust: %.0f%%)",
+            "Agent 3 complete: %d confirmed, %d phantom, %d missing, "
+            "%d coverage gaps (trust: %.0f%%)",
             len(result.confirmed_edges),
             len(result.phantom_edges),
             len(result.missing_edges),
+            len(result.codebase_extra_edges),
             result.flow_trust_score * 100,
         )
 
         return result, report_md, neo4j_graph, index_graph
+
+    def _find_codebase_coverage_gaps(
+        self,
+        neo4j_graph: CallGraphOutput,
+        index_graph: CallGraphOutput,
+    ) -> list[VerifiedEdge]:
+        """
+        Find codebase edges for functions in Agent 1's tree that Neo4j missed.
+
+        Scans the full stored edge index for outgoing edges of every function
+        that appears in Agent 1's call tree.  Any edge whose (caller, callee)
+        pair is NOT in Agent 1's tree is a coverage gap.
+
+        Language-agnostic: works on bare function names with case-insensitive
+        matching and ClassName.Method stripping.
+        """
+        if self._code_index is None:
+            return []
+
+        def _bare(name: str) -> str:
+            s = (name or "").strip().upper()
+            return s.rsplit(".", 1)[-1] if "." in s else s
+
+        def _extract_func(chunk_id: str) -> str:
+            parts = chunk_id.split("::")
+            for part in reversed(parts):
+                stripped = part.strip()
+                if stripped:
+                    return stripped
+            return chunk_id.strip()
+
+        def _extract_file(chunk_id: str) -> str:
+            parts = chunk_id.split("::")
+            return parts[0].strip() if parts else ""
+
+        neo4j_funcs: set[str] = set()
+        neo4j_funcs.add(_bare(neo4j_graph.root_function))
+        for e in neo4j_graph.edges:
+            neo4j_funcs.add(_bare(e.caller))
+            neo4j_funcs.add(_bare(e.callee))
+
+        neo4j_edge_pairs: set[tuple[str, str]] = set()
+        for e in neo4j_graph.edges:
+            neo4j_edge_pairs.add((_bare(e.caller), _bare(e.callee)))
+
+        # Also exclude edges already reported by Agent 2's traversal
+        # (these show up in missing_edges if Neo4j doesn't have them)
+        index_edge_pairs: set[tuple[str, str]] = set()
+        for e in index_graph.edges:
+            index_edge_pairs.add((_bare(e.caller), _bare(e.callee)))
+
+        all_stored = self._code_index.get_edges()
+        gaps: list[VerifiedEdge] = []
+        seen: set[tuple[str, str]] = set()
+
+        for edge in all_stored:
+            caller_chunk = edge.get("from") or edge.get("caller", "")
+            callee_chunk = edge.get("to") or edge.get("callee", "")
+            caller_name = _extract_func(caller_chunk)
+            callee_name = _extract_func(callee_chunk)
+            caller_bare = _bare(caller_name)
+            callee_bare = _bare(callee_name)
+
+            if caller_bare not in neo4j_funcs:
+                continue
+
+            pair = (caller_bare, callee_bare)
+            if pair in neo4j_edge_pairs or pair in index_edge_pairs or pair in seen:
+                continue
+            seen.add(pair)
+
+            gaps.append(VerifiedEdge(
+                caller=caller_name,
+                callee=callee_name,
+                caller_file=_extract_file(caller_chunk),
+                callee_file=_extract_file(callee_chunk),
+                classification=EdgeClassification.MISSING,
+                trust_score=edge.get("confidence", 0.0),
+                details="Codebase edge not in Neo4j — potential coverage gap",
+            ))
+
+        return gaps
 
     async def validate_flows(
         self,

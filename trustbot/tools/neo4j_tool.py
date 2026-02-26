@@ -294,7 +294,6 @@ class Neo4jTool(BaseTool):
 
         async def _do():
             edges: list[CallEdge] = []
-            seen_edges: set[tuple[str, str, int]] = set()
             async with self.driver.session() as session:
                 result = await session.run(query, key=key)
                 async for record in result:
@@ -303,11 +302,6 @@ class Neo4jTool(BaseTool):
                     if callee_key is None:
                         continue
                     call_props = dict(record["call_props"]) if record["call_props"] else {}
-                    exec_order = call_props.get("execution_order", 0)
-                    edge_key = (caller_key, callee_key, exec_order)
-                    if edge_key in seen_edges:
-                        continue
-                    seen_edges.add(edge_key)
                     if callee_key not in snippets and record["target"] is not None:
                         snippets[callee_key] = self._node_to_snippet(record["target"])
                     edges.append(

@@ -1,22 +1,19 @@
 """
-Scope-aware structural chunker for languages without tree-sitter AST support.
+Scope-aware structural chunker for languages with identifiable block delimiters.
 
 Unlike the regex chunker (which finds definition lines and splits "this definition
-to the next"), this chunker understands block boundaries -- matching open/close
+to the next"), this chunker understands block boundaries — matching open/close
 markers like DCL-PROC/END-PROC, BEGSR/ENDSR, DEFINE SUBROUTINE/END-DEFINE, etc.
 
-This produces structurally correct chunks that never split mid-block, similar to
-what a proper AST parser would do, but built from explicit block-boundary rules.
-
-Supported languages: RPG/RPGLE, FOCUS, Natural (SAG/ADABAS).
-Easily extensible to any language with identifiable block delimiters.
+Block rules are now read from LanguageProfile objects (set by Agent 0).
+If no profile is loaded, seed profiles are used transparently as fallback.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger("trustbot.indexing.structural_chunker")
 
@@ -46,131 +43,34 @@ class _BlockRule:
     name_group: str = "name"
 
 
-# ── Language block rules ─────────────────────────────────────────────────
-
-_RPG_RULES: list[_BlockRule] = [
-    _BlockRule(
-        block_type="procedure",
-        open_pattern=re.compile(
-            r"^\s*DCL-PROC\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END-PROC\b[^;\n]*;?", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="subroutine",
-        open_pattern=re.compile(
-            r"^\s*BEGSR\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*ENDSR\b[^;\n]*;?", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="data_structure",
-        open_pattern=re.compile(
-            r"^\s*DCL-DS\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END-DS\b[^;\n]*;?", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="interface",
-        open_pattern=re.compile(
-            r"^\s*DCL-PI\s+(?P<name>\w+|\*N)", re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END-PI\b[^;\n]*;?", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-]
-
-_FOCUS_RULES: list[_BlockRule] = [
-    _BlockRule(
-        block_type="procedure",
-        open_pattern=re.compile(
-            r"^-\s*DEFINE\s+(?:FUNCTION|FILE)\s+(?P<name>\w+)",
-            re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^-\s*END\b", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="table_request",
-        open_pattern=re.compile(
-            r"^\s*TABLE\s+FILE\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END\b", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="graph",
-        open_pattern=re.compile(
-            r"^\s*GRAPH\s+FILE\s+(?P<name>\w+)", re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END\b", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="if_block",
-        open_pattern=re.compile(
-            r"^-\s*IF\s+(?P<name>.+)", re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^-\s*ENDIF\b", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-]
-
-_NATURAL_RULES: list[_BlockRule] = [
-    _BlockRule(
-        block_type="subroutine",
-        open_pattern=re.compile(
-            r"^\s*DEFINE\s+SUBROUTINE\s+(?P<name>\w[\w\-]*)",
-            re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END-SUBROUTINE\b", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="function",
-        open_pattern=re.compile(
-            r"^\s*DEFINE\s+FUNCTION\s+(?P<name>\w[\w\-]*)",
-            re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END-FUNCTION\b", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-    _BlockRule(
-        block_type="class",
-        open_pattern=re.compile(
-            r"^\s*DEFINE\s+CLASS\s+(?P<name>\w[\w\-]*)",
-            re.MULTILINE | re.IGNORECASE,
-        ),
-        close_pattern=re.compile(
-            r"^\s*END-CLASS\b", re.MULTILINE | re.IGNORECASE,
-        ),
-    ),
-]
-
-LANGUAGE_RULES: dict[str, list[_BlockRule]] = {
-    "rpg": _RPG_RULES,
-    "rpgle": _RPG_RULES,
-    "focus": _FOCUS_RULES,
-    "natural": _NATURAL_RULES,
-}
-
-
 def _line_of(text: str, char_offset: int) -> int:
     """Return 1-based line number for a character offset."""
     return text[:char_offset].count("\n") + 1
+
+
+def _get_block_rules(language: str) -> list[_BlockRule]:
+    """Get compiled block rules from the active language profile."""
+    from trustbot.indexing.chunker import _get_profile
+
+    profile = _get_profile(language)
+    if not profile or not profile.block_rules:
+        return []
+
+    rules: list[_BlockRule] = []
+    for br in profile.block_rules:
+        try:
+            rules.append(_BlockRule(
+                block_type=br.block_type,
+                open_pattern=re.compile(br.open_pattern, re.MULTILINE | re.IGNORECASE),
+                close_pattern=re.compile(br.close_pattern, re.MULTILINE | re.IGNORECASE),
+                name_group=br.name_group or "name",
+            ))
+        except re.error as e:
+            logger.warning(
+                "Invalid block rule regex for %s/%s: %s",
+                language, br.block_type, e,
+            )
+    return rules
 
 
 def structural_chunk(
@@ -178,20 +78,16 @@ def structural_chunk(
     language: str,
     chunk_size: int = 2048,
 ) -> list[StructuralChunk]:
-    """
-    Parse *code* using block-boundary rules for *language* and return
-    structurally meaningful chunks.
+    """Parse *code* using block-boundary rules for *language*.
 
     Algorithm:
     1. Scan for all block open/close markers and record their positions.
     2. Match each opener with its nearest following closer of the same rule.
     3. Extract matched blocks as individual chunks.
-    4. Collect any remaining code between blocks as "preamble" / "interstitial"
-       chunks (declarations, control flow, comments outside blocks).
-    5. If a chunk exceeds *chunk_size* characters, split it at line boundaries
-       while keeping it as whole as possible.
+    4. Collect any remaining code between blocks as "preamble" / "interstitial".
+    5. Split oversized chunks at line boundaries.
     """
-    rules = LANGUAGE_RULES.get(language.lower(), [])
+    rules = _get_block_rules(language.lower())
     if not rules:
         return [
             StructuralChunk(
@@ -202,7 +98,6 @@ def structural_chunk(
             )
         ]
 
-    # Collect all block spans: (start_char, end_char, block_type, block_name)
     blocks: list[tuple[int, int, str, str]] = []
 
     for rule in rules:
@@ -213,7 +108,6 @@ def structural_chunk(
         for opener in openers:
             name = opener.group(rule.name_group)
             open_start = opener.start()
-            # Find the next closer that appears after this opener
             while ci < len(closers) and closers[ci].start() <= open_start:
                 ci += 1
             if ci < len(closers):
@@ -221,12 +115,10 @@ def structural_chunk(
                 blocks.append((open_start, close_end, rule.block_type, name))
                 ci += 1
             else:
-                # No closer found -- take to end of code
                 blocks.append((open_start, len(code), rule.block_type, name))
 
     blocks.sort(key=lambda b: b[0])
 
-    # Remove overlapping blocks (keep the first / outermost)
     merged: list[tuple[int, int, str, str]] = []
     for block in blocks:
         if merged and block[0] < merged[-1][1]:
@@ -235,10 +127,8 @@ def structural_chunk(
 
     chunks: list[StructuralChunk] = []
 
-    # Walk through code, emitting interstitial + block chunks
     pos = 0
     for start, end, btype, bname in merged:
-        # Interstitial code before this block (skip trivial whitespace/punctuation)
         if start > pos:
             inter = code[pos:start].strip()
             if len(inter) > 3:
@@ -260,7 +150,6 @@ def structural_chunk(
         ))
         pos = end
 
-    # Trailing code after last block (skip trivial remnants)
     if pos < len(code):
         tail = code[pos:].strip()
         if len(tail) > 3:
@@ -272,7 +161,6 @@ def structural_chunk(
                 line_end=_line_of(code, len(code) - 1),
             ))
 
-    # Split oversized chunks at line boundaries
     final: list[StructuralChunk] = []
     for chunk in chunks:
         if chunk.token_count <= chunk_size:
@@ -317,4 +205,10 @@ def structural_chunk(
 
 def get_supported_languages() -> list[str]:
     """Return list of languages that have structural block rules."""
-    return sorted(LANGUAGE_RULES.keys())
+    from trustbot.indexing.chunker import _ensure_profiles_loaded, _active_profiles
+
+    _ensure_profiles_loaded()
+    return sorted(
+        lang for lang, profile in _active_profiles.items()
+        if profile.block_rules
+    )

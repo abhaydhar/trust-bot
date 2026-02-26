@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 
 from trustbot.config import settings
-from trustbot.indexing.chunker import chunk_file, LANGUAGE_MAP, CODE_EXTENSIONS
+from trustbot.indexing.chunker import chunk_file, get_code_extensions, get_language_for_ext
 from trustbot.tools.filesystem_tool import IGNORED_DIRS
 
 logger = logging.getLogger("trustbot.index")
@@ -73,14 +73,34 @@ class CodeIndex:
             "CREATE INDEX IF NOT EXISTS idx_file_path ON code_index(file_path)"
         )
         
-        # Call edges table for storing call graph relationships
+        # Call edges table for storing call graph relationships.
+        # No UNIQUE constraint — multiple call sites from the same caller
+        # to the same callee are stored as separate rows to match Neo4j's
+        # per-call-site edge model.
+        cursor = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='call_edges'"
+        )
+        existing_ce = cursor.fetchone()
+        if existing_ce and "UNIQUE" in (existing_ce[0] or ""):
+            logger.info("Migrating call_edges: removing UNIQUE constraint")
+            conn.execute("DROP TABLE call_edges")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS call_edges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 caller TEXT NOT NULL,
                 callee TEXT NOT NULL,
-                confidence REAL DEFAULT 1.0,
-                UNIQUE(caller, callee)
+                confidence REAL DEFAULT 1.0
+            )
+        """)
+        # LLM call-extraction cache — avoids re-calling the LLM for
+        # chunks whose content has not changed across re-indexing runs.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS llm_call_cache (
+                content_hash TEXT PRIMARY KEY,
+                result_json TEXT NOT NULL,
+                model TEXT,
+                created_at TIMESTAMP
             )
         """)
         conn.commit()
@@ -106,7 +126,7 @@ class CodeIndex:
             dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
             for filename in files:
                 ext = Path(filename).suffix
-                if ext not in CODE_EXTENSIONS:
+                if ext not in get_code_extensions():
                     continue
 
                 filepath = Path(root_dir) / filename
@@ -121,7 +141,7 @@ class CodeIndex:
                     logger.debug("Skipping %s: %s", filepath, e)
                     continue
 
-                lang = LANGUAGE_MAP.get(ext, "unknown")
+                lang = get_language_for_ext(ext)
                 for chunk in chunks:
                     name = chunk.function_name or chunk.class_name
                     if not name:
@@ -215,6 +235,16 @@ class CodeIndex:
         conn = self._get_conn()
         rows = conn.execute("SELECT caller, callee, confidence FROM call_edges").fetchall()
         return [{"from": r[0], "to": r[1], "confidence": r[2]} for r in rows]
+
+    def get_cache_conn(self) -> sqlite3.Connection:
+        """Return the raw DB connection for use by the LLM call cache."""
+        return self._get_conn()
+
+    def clear_llm_cache(self) -> None:
+        """Drop all cached LLM call-extraction results."""
+        conn = self._get_conn()
+        conn.execute("DELETE FROM llm_call_cache")
+        conn.commit()
 
     def close(self) -> None:
         """Close the database connection."""

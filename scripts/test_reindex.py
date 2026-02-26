@@ -15,6 +15,10 @@ from trustbot.index.code_index import CodeIndex
 from trustbot.config import settings
 
 
+async def _build_edges(chunks, cache_conn):
+    return await build_call_graph_from_chunks(chunks, cache_conn=cache_conn)
+
+
 def main():
     db_path = settings.codebase_root / ".trustbot_git_index.db"
 
@@ -36,8 +40,10 @@ def main():
     delphi_chunks = [c for c in chunks if c.language == "delphi"]
     print(f"  {len(delphi_chunks)} Delphi chunks")
 
-    print("\nBuilding call graph...")
-    edges = build_call_graph_from_chunks(chunks)
+    print("\nBuilding call graph (LLM extraction)...")
+    code_index = CodeIndex(db_path=db_path)
+    cache_conn = code_index.get_cache_conn()
+    edges = asyncio.run(_build_edges(chunks, cache_conn))
     print(f"  {len(edges)} edges")
 
     print("\n" + "=" * 60)
@@ -71,11 +77,8 @@ def main():
     for e in ca_edges:
         print(f"  {e.from_chunk} -> {e.to_chunk} (conf={e.confidence})")
 
-    # Rebuild index
-    print("\n\nRebuilding code index...")
-    code_index = CodeIndex(db_path=db_path)
-    code_index.build(codebase_root=repo_path)
-
+    # Store edges in the same index used for caching
+    print("\n\nStoring edges in code index...")
     edge_tuples = [(e.from_chunk, e.to_chunk, e.confidence) for e in edges]
     count = code_index.store_edges(edge_tuples)
     print(f"Stored {count} edges in index DB")

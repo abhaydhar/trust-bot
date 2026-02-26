@@ -138,6 +138,7 @@ class VerificationResult(BaseModel):
     phantom_edges: list[VerifiedEdge] = Field(default_factory=list)
     missing_edges: list[VerifiedEdge] = Field(default_factory=list)
     conflicted_edges: list[VerifiedEdge] = Field(default_factory=list)
+    codebase_extra_edges: list[VerifiedEdge] = Field(default_factory=list)
     unresolved_callees: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
 

@@ -838,7 +838,7 @@ class TestDfmCallGraphEdges:
 
     def test_dfm_form_creates_edges_to_handlers(self):
         from trustbot.indexing.chunker import CodeChunk
-        from trustbot.indexing.call_graph_builder import build_call_graph_from_chunks
+        from trustbot.indexing.call_graph_builder import build_call_graph_from_chunks_sync
 
         form_chunk = CodeChunk(
             file_path="proj/Unit1.dfm",
@@ -865,7 +865,7 @@ class TestDfmCallGraphEdges:
             line_start=22, line_end=30,
             content="procedure TForm1.Button2Click(Sender: TObject);\nbegin\nend;",
         )
-        edges = build_call_graph_from_chunks([form_chunk, handler1, handler2])
+        edges = build_call_graph_from_chunks_sync([form_chunk, handler1, handler2])
         edge_pairs = [(e.from_chunk, e.to_chunk) for e in edges]
 
         # Form1 should have edges to both handlers

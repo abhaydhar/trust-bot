@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 from trustbot.config import settings
-from trustbot.indexing.chunker import chunk_codebase, CODE_EXTENSIONS
+from trustbot.indexing.chunker import chunk_codebase
 from trustbot.indexing.call_graph_builder import build_call_graph_from_chunks
 from trustbot.index.code_index import CodeIndex
 
@@ -56,13 +56,22 @@ class GitCodeIndexer:
             progress_callback(0.0, "Cloning repository...")
         
         try:
-            # Clone the repo
             repo = git.Repo.clone_from(git_url, self._temp_dir, branch=branch, depth=1)
             
             if progress_callback:
-                progress_callback(0.3, "Repository cloned, scanning files...")
+                progress_callback(0.2, "Repository cloned, running Agent 0 (language detection)...")
+
+            from trustbot.agents.agent0_language import Agent0LanguageProfiler
+            from trustbot.indexing.chunker import set_language_profiles
+
+            agent0 = Agent0LanguageProfiler(self._temp_dir)
+            profiles = await agent0.run()
+            if profiles:
+                set_language_profiles(profiles)
+
+            if progress_callback:
+                progress_callback(0.35, "Scanning files...")
             
-            # Chunk all code files
             chunks = await asyncio.to_thread(chunk_codebase, self._temp_dir)
             
             if progress_callback:
@@ -78,9 +87,10 @@ class GitCodeIndexer:
             if progress_callback:
                 progress_callback(0.7, f"Building call graph from {function_count} functions...")
             
-            # Build call graph
-            edges = await asyncio.to_thread(build_call_graph_from_chunks, chunks)
-            
+            # Build call graph (LLM-based extraction with cache)
+            cache_conn = code_index.get_cache_conn()
+            edges = await build_call_graph_from_chunks(chunks, cache_conn=cache_conn)
+
             # Store edges in the database
             edge_tuples = [(e.from_chunk, e.to_chunk, e.confidence) for e in edges]
             code_index.store_edges(edge_tuples)

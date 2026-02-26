@@ -41,6 +41,7 @@ class ReportAgent:
         lines.extend([
             f"- **Phantom edges** (Neo4j only): {len(result.phantom_edges)}",
             f"- **Missing edges** (filesystem only): {len(result.missing_edges)}",
+            f"- **Codebase coverage gaps**: {len(result.codebase_extra_edges)}",
             f"- **Conflicted edges**: {len(result.conflicted_edges)}",
             f"- **Unresolved callees**: {len(result.unresolved_callees)}",
             "",
@@ -70,6 +71,28 @@ class ReportAgent:
                 lines.append(f"- `{e.caller}` → `{e.callee}`")
             if len(result.missing_edges) > 20:
                 lines.append(f"- ... and {len(result.missing_edges) - 20} more")
+            lines.append("")
+
+        if result.codebase_extra_edges:
+            lines.extend([
+                "## Codebase Coverage Gaps",
+                "",
+                "Edges found in the indexed codebase for functions in the Neo4j call tree,",
+                "but **not present in Neo4j**. These are real calls in the code that Neo4j may be missing.",
+                "",
+                "| Caller | Callee | Caller File | Callee File | Confidence |",
+                "|--------|--------|-------------|-------------|------------|",
+            ])
+            for e in result.codebase_extra_edges[:30]:
+                caller_file = e.caller_file.replace("\\", "/").rsplit("/", 1)[-1] if e.caller_file else ""
+                callee_file = e.callee_file.replace("\\", "/").rsplit("/", 1)[-1] if e.callee_file else ""
+                lines.append(
+                    f"| `{e.caller}` | `{e.callee}` | {caller_file} | {callee_file} | {e.trust_score:.2f} |"
+                )
+            if len(result.codebase_extra_edges) > 30:
+                lines.append(
+                    f"| ... | +{len(result.codebase_extra_edges) - 30} more | | | |"
+                )
             lines.append("")
 
         if result.unresolved_callees:
@@ -107,10 +130,13 @@ class ReportAgent:
         total = len(result.confirmed_edges) + len(result.phantom_edges) + len(result.missing_edges)
         if total == 0:
             return "No edges to validate."
-        return (
+        parts = [
             f"Flow {result.execution_flow_id}: "
             f"{result.flow_trust_score:.0%} trust — "
             f"{len(result.confirmed_edges)} confirmed, "
             f"{len(result.phantom_edges)} phantom, "
-            f"{len(result.missing_edges)} missing"
-        )
+            f"{len(result.missing_edges)} missing",
+        ]
+        if result.codebase_extra_edges:
+            parts.append(f", {len(result.codebase_extra_edges)} coverage gaps")
+        return "".join(parts)
