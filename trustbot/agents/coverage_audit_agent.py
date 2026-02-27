@@ -117,6 +117,9 @@ class CoverageAuditAgent:
 
         # -- Step 2: fetch codebase edges --
         raw_edges = self._index.get_edges()
+        logger.info("Codebase raw edges: %d", len(raw_edges))
+        if raw_edges:
+            logger.info("Sample codebase edge: from=%s, to=%s", raw_edges[0]["from"], raw_edges[0]["to"])
 
         func_info = self._load_function_info()
 
@@ -145,6 +148,11 @@ class CoverageAuditAgent:
 
         if progress_callback:
             progress_callback(0.70, "Comparing edges...")
+
+        logger.info("Codebase unique edges: %d", len(codebase_set))
+        if codebase_set:
+            sample_key = next(iter(codebase_set))
+            logger.info("Sample codebase edge key: %s", sample_key)
 
         # -- Step 3: set comparison --
         neo4j_keys = set(neo4j_set.keys())
@@ -248,14 +256,17 @@ class CoverageAuditAgent:
                callee.function_name AS callee_func,
                callee.name          AS callee_name,
                callee.file_path     AS callee_file,
-               callee.file_name     AS callee_file_name,
+               callee.callee_file_name     AS callee_file_name,
                callee.class_name    AS callee_class
         """
         rows = await self._neo4j.query(cypher, {"pid": project_id, "rid": run_id})
+        logger.info("Neo4j CALLS query returned %d rows", len(rows))
+        if rows:
+            logger.info("Sample row keys: %s", list(rows[0].keys()))
+            logger.info("Sample row: %s", dict(rows[0]))
 
         snippet_cypher = """
-        MATCH (s:Snippet)
-        WHERE s.project_id = $pid AND s.run_id = $rid
+        MATCH (s:Snippet {project_id: $pid, run_id: $rid})
         RETURN count(s) AS cnt
         """
         snippet_rows = await self._neo4j.query(
@@ -264,12 +275,19 @@ class CoverageAuditAgent:
         snippet_count = snippet_rows[0]["cnt"] if snippet_rows else 0
 
         neo4j_set: dict[_EdgeKey, AuditEdge] = {}
+        skipped = 0
         for row in rows:
             caller_func = row.get("caller_func") or row.get("caller_name") or ""
             callee_func = row.get("callee_func") or row.get("callee_name") or ""
             caller_file = row.get("caller_file") or row.get("caller_file_name") or ""
             callee_file = row.get("callee_file") or row.get("callee_file_name") or ""
             if not caller_func or not callee_func:
+                skipped += 1
+                if skipped <= 3:
+                    logger.warning(
+                        "Skipping row (empty func): caller_func=%r, callee_func=%r, row=%s",
+                        caller_func, callee_func, dict(row),
+                    )
                 continue
             key = _normalise_key(caller_func, caller_file, callee_func, callee_file)
             if key not in neo4j_set:
@@ -284,9 +302,12 @@ class CoverageAuditAgent:
                 )
 
         logger.info(
-            "Neo4j direct query: %d raw CALLS rows → %d unique edges, %d snippets",
-            len(rows), len(neo4j_set), snippet_count,
+            "Neo4j: %d raw rows, %d skipped (no func), %d unique edges, %d snippets",
+            len(rows), skipped, len(neo4j_set), snippet_count,
         )
+        if neo4j_set:
+            sample_key = next(iter(neo4j_set))
+            logger.info("Sample neo4j edge key: %s", sample_key)
         return neo4j_set, len(rows), snippet_count
 
     def _load_function_info(self) -> dict[tuple[str, str], str]:
