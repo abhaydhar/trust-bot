@@ -12,7 +12,6 @@ No LLM is needed — this is a pure set-comparison agent.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -105,40 +104,13 @@ class CoverageAuditAgent:
     ) -> CoverageAuditResult:
         """Run the full audit and return a structured result."""
 
-        # -- Step 1: fetch Neo4j edges --
+        # -- Step 1: fetch ALL Neo4j CALLS edges directly (no execution flows) --
         if progress_callback:
-            progress_callback(0.05, "Fetching Neo4j call graph...")
+            progress_callback(0.05, "Fetching Neo4j CALLS relationships...")
 
-        project_graph = await self._neo4j.get_project_call_graph(
+        neo4j_set, neo4j_raw_count, snippet_count = await self._fetch_neo4j_edges(
             project_id, run_id,
         )
-        all_snippets = project_graph.all_snippets
-        all_neo4j_edges = project_graph.all_edges
-
-        neo4j_set: dict[_EdgeKey, AuditEdge] = {}
-        for edge in all_neo4j_edges:
-            caller_snip = all_snippets.get(edge.caller_id)
-            callee_snip = all_snippets.get(edge.callee_id)
-            if not caller_snip or not callee_snip:
-                continue
-            caller_func = caller_snip.function_name or caller_snip.name or ""
-            callee_func = callee_snip.function_name or callee_snip.name or ""
-            if not caller_func or not callee_func:
-                continue
-            key = _normalise_key(
-                caller_func, caller_snip.file_path,
-                callee_func, callee_snip.file_path,
-            )
-            if key not in neo4j_set:
-                neo4j_set[key] = AuditEdge(
-                    caller=caller_func,
-                    callee=callee_func,
-                    caller_file=caller_snip.file_path,
-                    callee_file=callee_snip.file_path,
-                    caller_class=caller_snip.class_name,
-                    callee_class=callee_snip.class_name,
-                    confidence=1.0,
-                )
 
         if progress_callback:
             progress_callback(0.40, "Fetching codebase edges...")
@@ -227,16 +199,15 @@ class CoverageAuditAgent:
         result = CoverageAuditResult(
             project_id=project_id,
             run_id=run_id,
-            neo4j_total_edges=len(all_neo4j_edges),
+            neo4j_total_edges=neo4j_raw_count,
             codebase_total_edges=len(raw_edges),
-            neo4j_snippet_count=len(all_snippets),
+            neo4j_snippet_count=snippet_count,
             codebase_function_count=codebase_func_count,
             confirmed=confirmed,
             missing_from_neo4j=missing_from_neo4j,
             phantom_in_neo4j=phantom_in_neo4j,
             coverage_score=coverage,
             metadata={
-                "flows_scanned": len(project_graph.execution_flows),
                 "name_only_matches": len(extra_confirmed_code),
             },
         )
@@ -256,6 +227,67 @@ class CoverageAuditAgent:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _fetch_neo4j_edges(
+        self, project_id: int, run_id: int,
+    ) -> tuple[dict[_EdgeKey, AuditEdge], int, int]:
+        """
+        Directly query ALL Snippet-[:CALLS]->Snippet relationships
+        for the given project/run — no execution flow dependency.
+
+        Returns (edge_dict, raw_edge_count, snippet_count).
+        """
+        cypher = """
+        MATCH (caller:Snippet)-[c:CALLS]->(callee:Snippet)
+        WHERE caller.project_id = $pid AND caller.run_id = $rid
+        RETURN caller.function_name AS caller_func,
+               caller.name          AS caller_name,
+               caller.file_path     AS caller_file,
+               caller.file_name     AS caller_file_name,
+               caller.class_name    AS caller_class,
+               callee.function_name AS callee_func,
+               callee.name          AS callee_name,
+               callee.file_path     AS callee_file,
+               callee.file_name     AS callee_file_name,
+               callee.class_name    AS callee_class
+        """
+        rows = await self._neo4j.query(cypher, {"pid": project_id, "rid": run_id})
+
+        snippet_cypher = """
+        MATCH (s:Snippet)
+        WHERE s.project_id = $pid AND s.run_id = $rid
+        RETURN count(s) AS cnt
+        """
+        snippet_rows = await self._neo4j.query(
+            snippet_cypher, {"pid": project_id, "rid": run_id},
+        )
+        snippet_count = snippet_rows[0]["cnt"] if snippet_rows else 0
+
+        neo4j_set: dict[_EdgeKey, AuditEdge] = {}
+        for row in rows:
+            caller_func = row.get("caller_func") or row.get("caller_name") or ""
+            callee_func = row.get("callee_func") or row.get("callee_name") or ""
+            caller_file = row.get("caller_file") or row.get("caller_file_name") or ""
+            callee_file = row.get("callee_file") or row.get("callee_file_name") or ""
+            if not caller_func or not callee_func:
+                continue
+            key = _normalise_key(caller_func, caller_file, callee_func, callee_file)
+            if key not in neo4j_set:
+                neo4j_set[key] = AuditEdge(
+                    caller=caller_func,
+                    callee=callee_func,
+                    caller_file=caller_file,
+                    callee_file=callee_file,
+                    caller_class=row.get("caller_class") or "",
+                    callee_class=row.get("callee_class") or "",
+                    confidence=1.0,
+                )
+
+        logger.info(
+            "Neo4j direct query: %d raw CALLS rows → %d unique edges, %d snippets",
+            len(rows), len(neo4j_set), snippet_count,
+        )
+        return neo4j_set, len(rows), snippet_count
 
     def _load_function_info(self) -> dict[tuple[str, str], str]:
         """Load (FUNC_NAME, NORM_FILE) → class_name map from code_index."""
