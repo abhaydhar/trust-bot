@@ -755,6 +755,31 @@ def _result_to_dict(r: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Coverage Audit — table formatter
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _format_audit_edge_table(edges, title: str) -> str:
+    """Format a list of AuditEdge objects into a Markdown table."""
+    if not edges:
+        return f"*No {title.lower()} edges.*"
+    lines = [
+        f"**{title}** ({len(edges)} edges)\n",
+        "| # | Caller | Caller File | Callee | Callee File | Confidence |",
+        "|---|--------|-------------|--------|-------------|------------|",
+    ]
+    for i, e in enumerate(edges, 1):
+        caller_file = e.caller_file.replace("\\", "/").rsplit("/", 1)[-1] if e.caller_file else ""
+        callee_file = e.callee_file.replace("\\", "/").rsplit("/", 1)[-1] if e.callee_file else ""
+        conf = f"{e.confidence:.2f}" if e.confidence < 1.0 else "1.00"
+        lines.append(
+            f"| {i} | {e.caller} | {caller_file} | "
+            f"{e.callee} | {callee_file} | {conf} |"
+        )
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # DB Entity Checker — render helpers
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1491,6 +1516,178 @@ def create_ui():
                     validate_btn.enable()
 
                 validate_btn.on_click(_on_validate_click)
+
+                # ───────────────────────────────────────────────────────
+                # Coverage Audit — Neo4j Completeness Check
+                # ───────────────────────────────────────────────────────
+                ui.separator().classes("q-my-lg")
+                ui.markdown(
+                    "### Coverage Audit — Neo4j Completeness Check\n"
+                    "Compare **all** CALLS relationships in Neo4j against **all** "
+                    "call edges found in the indexed codebase. Reports calls that "
+                    "exist in source but are **missing from Neo4j**, plus calls in "
+                    "Neo4j not confirmed by the codebase."
+                )
+                with ui.row().classes("w-full gap-4 items-end"):
+                    audit_btn = ui.button(
+                        "Run Coverage Audit", color="secondary",
+                        icon="fact_check",
+                    )
+                audit_progress = ui.linear_progress(
+                    value=0, show_value=False,
+                ).classes("w-full")
+                audit_progress.set_visibility(False)
+                audit_step_label = ui.label("")
+
+                audit_report_section = ui.column().classes("w-full gap-2")
+                audit_report_section.set_visibility(False)
+
+                with audit_report_section:
+                    audit_summary_md = ui.markdown("")
+
+                    with ui.expansion(
+                        "Missing from Neo4j", icon="warning",
+                    ).classes(accordion_classes) as exp_missing:
+                        exp_missing.props["header-class"] = "bg-red-7 text-white"
+                        with ui.element("div").classes(accordion_body_classes):
+                            audit_missing_md = ui.markdown("")
+
+                    with ui.expansion(
+                        "Phantom in Neo4j (not confirmed by codebase)",
+                        icon="help_outline",
+                    ).classes(accordion_classes) as exp_phantom:
+                        exp_phantom.props["header-class"] = "bg-orange-7 text-white"
+                        with ui.element("div").classes(accordion_body_classes):
+                            audit_phantom_md = ui.markdown("")
+
+                    with ui.expansion(
+                        "Confirmed Edges", icon="check_circle",
+                    ).classes(accordion_classes) as exp_confirmed:
+                        exp_confirmed.props["header-class"] = accordion_header_class
+                        with ui.element("div").classes(accordion_body_classes):
+                            audit_confirmed_md = ui.markdown("")
+
+                async def _on_audit_click():
+                    p_str = (project_id_input.value or "").strip()
+                    r_str = (run_id_input.value or "").strip()
+                    if not p_str or not r_str:
+                        audit_summary_md.set_content(
+                            "Please enter both Project ID and Run ID above."
+                        )
+                        audit_report_section.set_visibility(True)
+                        return
+
+                    try:
+                        project_id = int(p_str)
+                        run_id = int(r_str)
+                    except ValueError:
+                        audit_summary_md.set_content(
+                            "Project ID and Run ID must be integers."
+                        )
+                        audit_report_section.set_visibility(True)
+                        return
+
+                    if not _git_index:
+                        audit_summary_md.set_content(
+                            "**No codebase indexed.** Index a repository first."
+                        )
+                        audit_report_section.set_visibility(True)
+                        return
+
+                    audit_btn.disable()
+                    audit_progress.set_visibility(True)
+                    audit_progress.set_value(0)
+                    audit_step_label.set_text("Starting coverage audit...")
+
+                    try:
+                        registry = await _get_registry_async()
+                        neo4j_tool = registry.get("neo4j")
+
+                        from trustbot.agents.coverage_audit_agent import (
+                            CoverageAuditAgent,
+                        )
+
+                        agent = CoverageAuditAgent(
+                            neo4j_tool=neo4j_tool,
+                            code_index=_git_index,
+                        )
+
+                        def _audit_progress(pct, msg):
+                            audit_progress.set_value(pct)
+                            audit_step_label.set_text(msg)
+
+                        result = await agent.audit(
+                            project_id, run_id,
+                            progress_callback=_audit_progress,
+                        )
+
+                        audit_report_section.set_visibility(True)
+
+                        score_pct = result.coverage_score * 100
+                        score_color = (
+                            "green" if score_pct >= 70
+                            else "orange" if score_pct >= 40
+                            else "red"
+                        )
+                        name_matches = result.metadata.get("name_only_matches", 0)
+                        name_note = (
+                            f"\n- Name-only matches (file path mismatch): "
+                            f"{name_matches}"
+                            if name_matches else ""
+                        )
+
+                        audit_summary_md.set_content(
+                            f"## Coverage Audit Results\n"
+                            f"**Project**: {result.project_id} | "
+                            f"**Run**: {result.run_id}\n\n"
+                            f"### Coverage Score: "
+                            f"<span style='color:{score_color}'>"
+                            f"**{score_pct:.0f}%**</span>\n\n"
+                            f"- Neo4j edges: {result.neo4j_total_edges} | "
+                            f"Codebase edges: {result.codebase_total_edges}\n"
+                            f"- Neo4j snippets: {result.neo4j_snippet_count} | "
+                            f"Codebase functions: "
+                            f"{result.codebase_function_count}\n"
+                            f"- **Confirmed**: {len(result.confirmed)} | "
+                            f"**Missing from Neo4j**: "
+                            f"{len(result.missing_from_neo4j)} | "
+                            f"**Phantom in Neo4j**: "
+                            f"{len(result.phantom_in_neo4j)}"
+                            f"{name_note}"
+                        )
+
+                        audit_missing_md.set_content(
+                            _format_audit_edge_table(
+                                result.missing_from_neo4j,
+                                "Missing from Neo4j",
+                            )
+                        )
+                        audit_phantom_md.set_content(
+                            _format_audit_edge_table(
+                                result.phantom_in_neo4j,
+                                "Phantom in Neo4j",
+                            )
+                        )
+                        audit_confirmed_md.set_content(
+                            _format_audit_edge_table(
+                                result.confirmed,
+                                "Confirmed",
+                            )
+                        )
+
+                        audit_step_label.set_text("Coverage audit complete!")
+
+                    except Exception as exc:
+                        logger.exception("Coverage audit failed")
+                        audit_summary_md.set_content(
+                            f"**Coverage audit failed**: {exc}"
+                        )
+                        audit_report_section.set_visibility(True)
+                    finally:
+                        audit_btn.enable()
+                        audit_progress.set_value(1.0)
+
+                audit_btn.on_click(_on_audit_click)
 
             # ═══════════════════════════════════════════════════════════
             # Tab 3: Chunk Visualizer
