@@ -81,6 +81,14 @@ async def initialize_app() -> ToolRegistry:
     except Exception as e:
         logger.warning("Index tool skipped (ChromaDB error: %s)", str(e)[:100])
 
+    try:
+        from trustbot.tools.build_tool import BuildTool
+        build_tool = BuildTool()
+        registry.register(build_tool)
+        logger.info("Build tool registered (npm/dotnet CLI)")
+    except Exception as e:
+        logger.warning("Build tool skipped: %s", str(e)[:100])
+
     if settings.enable_browser_tool:
         try:
             from trustbot.tools.browser_tool import BrowserTool
