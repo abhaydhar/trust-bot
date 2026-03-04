@@ -13,6 +13,7 @@ data/
 .venv/
 venv/
 env/
+modernization_output/
 
 .pytest_cache/
 .ruff_cache/

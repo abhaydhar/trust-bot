@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import threading
+from collections import deque
 from pathlib import Path
 
-from nicegui import app, ui
+from nicegui import app, background_tasks, ui
 
 from trustbot.config import settings
 from trustbot.models.agentic import VerificationResult
@@ -50,9 +52,38 @@ def _short_chunk_id(chunk_id: str) -> str:
 _git_index = None
 _pipeline = None
 _orchestrator = None
+_indexed_codebase_path: Path | None = None
 
 _progress_state = {"step": "", "pct": 0.0, "done": False}
 _progress_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Modernization pipeline — module-level state survives page reloads
+# ---------------------------------------------------------------------------
+_mod_pipeline = None
+_mod_state: dict = {"phase": "not_started", "p1": None, "p2": None, "p3": None}
+_mod_progress: dict = {"pct": 0.0, "step": "", "done": False}
+_mod_log_lines: deque[tuple[str, str]] = deque(maxlen=500)
+_mod_lock = threading.Lock()
+
+
+def _set_mod_progress(pct: float, step: str, done: bool = False):
+    with _mod_lock:
+        _mod_progress["pct"] = pct
+        _mod_progress["step"] = step
+        _mod_progress["done"] = done
+        if step:
+            _mod_log_lines.append(("info", step))
+
+
+def _get_mod_progress() -> dict:
+    with _mod_lock:
+        return dict(_mod_progress)
+
+
+def _append_mod_log(msg: str, level: str = "info"):
+    with _mod_lock:
+        _mod_log_lines.append((level, msg))
 
 
 def _set_progress(pct: float, step: str, done: bool = False):
@@ -68,13 +99,33 @@ def _get_progress():
 
 
 # ---------------------------------------------------------------------------
+# Tearsheet — holistic codebase overview (module-level, survives reloads)
+# ---------------------------------------------------------------------------
+_tearsheet_result: dict | None = None
+_tearsheet_progress: dict = {"pct": 0.0, "step": "", "done": False}
+_tearsheet_lock = threading.Lock()
+
+
+def _set_tearsheet_progress(pct: float, step: str, done: bool = False):
+    with _tearsheet_lock:
+        _tearsheet_progress["pct"] = pct
+        _tearsheet_progress["step"] = step
+        _tearsheet_progress["done"] = done
+
+
+def _get_tearsheet_progress() -> dict:
+    with _tearsheet_lock:
+        return dict(_tearsheet_progress)
+
+
+# ---------------------------------------------------------------------------
 # Async backend handlers
 # ---------------------------------------------------------------------------
 
 
 async def _clone_and_index_repo(git_url: str, branch: str, progress_cb=None):
     """Clone a git repo and build code index."""
-    global _git_index
+    global _git_index, _indexed_codebase_path
     if not git_url.strip():
         return "Please enter a Git repository URL."
     try:
@@ -91,6 +142,8 @@ async def _clone_and_index_repo(git_url: str, branch: str, progress_cb=None):
         )
         if progress_cb:
             progress_cb(0.9, "Finalizing...")
+
+        _indexed_codebase_path = Path(result["repo_path"])
 
         from trustbot.index.code_index import CodeIndex
         git_index_path = settings.codebase_root / ".trustbot_git_index.db"
@@ -121,7 +174,7 @@ async def _clone_and_index_repo(git_url: str, branch: str, progress_cb=None):
 
 async def _index_local_folder(folder_path: str, progress_cb=None):
     """Index code directly from a local folder."""
-    global _git_index
+    global _git_index, _indexed_codebase_path
     folder_path = (folder_path or "").strip()
     if not folder_path:
         return "Please enter a folder path."
@@ -182,6 +235,8 @@ async def _index_local_folder(folder_path: str, progress_cb=None):
         if progress_cb:
             progress_cb(0.9, "Finalizing...")
 
+        _indexed_codebase_path = folder.resolve()
+
         _git_index = CodeIndex(db_path=git_index_path)
         if _pipeline:
             _pipeline.set_code_index(_git_index)
@@ -213,6 +268,216 @@ async def _index_local_folder(folder_path: str, progress_cb=None):
     except Exception as e:
         logger.exception("Local folder indexing failed")
         return f"Error: {e}"
+
+
+def _count_loc(root: Path) -> tuple[dict[str, dict], int]:
+    """
+    Walk *root* and count non-blank lines of code grouped by file extension.
+
+    Returns (loc_by_ext, grand_total) where loc_by_ext maps extension string
+    to {"files": int, "loc": int}.  Skips directories in IGNORED_DIRS.
+    """
+    from trustbot.tools.filesystem_tool import IGNORED_DIRS
+
+    loc_by_ext: dict[str, dict] = {}
+    grand_total = 0
+
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
+        for fname in files:
+            ext = os.path.splitext(fname)[1].lower()
+            if not ext:
+                continue
+            filepath = os.path.join(dirpath, fname)
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as fh:
+                    loc = sum(1 for line in fh if line.strip())
+            except (OSError, UnicodeDecodeError):
+                continue
+
+            if ext not in loc_by_ext:
+                loc_by_ext[ext] = {"files": 0, "loc": 0}
+            loc_by_ext[ext]["files"] += 1
+            loc_by_ext[ext]["loc"] += loc
+            grand_total += loc
+
+    return loc_by_ext, grand_total
+
+
+async def _generate_tearsheet():
+    """
+    Generate a holistic ~200-word tearsheet summarising the indexed codebase.
+    Pulls raw stats from CodeIndex (SQLite), counts LOC from disk, and sends
+    them to the LLM for a human-friendly overview.
+    """
+    global _tearsheet_result
+
+    if _git_index is None:
+        return "**No codebase indexed yet.** Please index a codebase first."
+
+    _set_tearsheet_progress(0.1, "Gathering codebase statistics...")
+
+    try:
+        conn = _git_index.get_cache_conn()
+
+        files_row = conn.execute(
+            "SELECT COUNT(DISTINCT file_path) AS cnt FROM code_index"
+        ).fetchone()
+        total_files = files_row["cnt"] if files_row else 0
+
+        funcs_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM code_index"
+        ).fetchone()
+        total_functions = funcs_row["cnt"] if funcs_row else 0
+
+        classes_row = conn.execute(
+            "SELECT COUNT(DISTINCT class_name) AS cnt FROM code_index "
+            "WHERE class_name IS NOT NULL AND class_name != ''"
+        ).fetchone()
+        total_classes = classes_row["cnt"] if classes_row else 0
+
+        lang_rows = conn.execute(
+            "SELECT language, COUNT(*) AS cnt FROM code_index "
+            "GROUP BY language ORDER BY cnt DESC"
+        ).fetchall()
+        language_breakdown = ", ".join(
+            f"{r['language']} ({r['cnt']})" for r in lang_rows
+        )
+
+        edge_row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM call_edges"
+        ).fetchone()
+        total_edges = edge_row["cnt"] if edge_row else 0
+
+        callee_rows = conn.execute(
+            "SELECT callee, COUNT(*) AS cnt FROM call_edges "
+            "GROUP BY callee ORDER BY cnt DESC LIMIT 5"
+        ).fetchall()
+        top_callees = ", ".join(
+            f"{r['callee']} ({r['cnt']} calls)" for r in callee_rows
+        )
+
+        caller_rows = conn.execute(
+            "SELECT caller, COUNT(*) AS cnt FROM call_edges "
+            "GROUP BY caller ORDER BY cnt DESC LIMIT 5"
+        ).fetchall()
+        top_callers = ", ".join(
+            f"{r['caller']} ({r['cnt']} outgoing)" for r in caller_rows
+        )
+
+        db_call_keywords = ("SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE",
+                            "SqlCommand", "SqlConnection", "DbCommand",
+                            "ExecuteReader", "ExecuteNonQuery", "ExecuteScalar",
+                            "FROM ", "JOIN ")
+        db_files = set()
+        all_funcs = conn.execute(
+            "SELECT function_name, file_path FROM code_index"
+        ).fetchall()
+        for row in all_funcs:
+            name = (row["function_name"] or "").upper()
+            if any(kw.upper() in name for kw in db_call_keywords):
+                db_files.add(row["file_path"])
+        db_related_functions = len(db_files)
+
+        # --- Lines of Code scan ---
+        _set_tearsheet_progress(0.25, "Counting lines of code...")
+
+        codebase_root = (
+            _indexed_codebase_path
+            if _indexed_codebase_path and _indexed_codebase_path.exists()
+            else settings.codebase_root.resolve()
+        )
+        loc_by_ext, loc_grand_total = await asyncio.to_thread(
+            _count_loc, codebase_root,
+        )
+        sorted_loc = sorted(
+            loc_by_ext.items(), key=lambda kv: kv[1]["loc"], reverse=True,
+        )
+
+        loc_table_md = (
+            "### Lines of Code (LOC) by File Type\n\n"
+            "| Extension | Files | Lines of Code | % of Total |\n"
+            "|-----------|------:|-------------:|----------:|\n"
+        )
+        for ext, info in sorted_loc:
+            pct = (info["loc"] / loc_grand_total * 100) if loc_grand_total else 0
+            loc_table_md += (
+                f"| `{ext}` | {info['files']:,} | {info['loc']:,} | {pct:.1f}% |\n"
+            )
+        loc_table_md += (
+            f"| **Total** | **{sum(v['files'] for v in loc_by_ext.values()):,}** "
+            f"| **{loc_grand_total:,}** | **100%** |\n"
+        )
+
+        loc_summary_for_llm = "\n".join(
+            f"  {ext}: {info['loc']:,} LOC across {info['files']} files"
+            for ext, info in sorted_loc[:15]
+        )
+
+        _set_tearsheet_progress(0.4, "Sending to LLM for analysis...")
+
+        stats_block = (
+            f"Total files: {total_files}\n"
+            f"Total functions/procedures: {total_functions}\n"
+            f"Total classes: {total_classes}\n"
+            f"Languages: {language_breakdown or 'N/A'}\n"
+            f"Call graph edges: {total_edges}\n"
+            f"Most-called functions: {top_callees or 'N/A'}\n"
+            f"Functions with most outgoing calls: {top_callers or 'N/A'}\n"
+            f"Files with DB-related functions: {db_related_functions}\n"
+            f"Grand total lines of code: {loc_grand_total:,}\n"
+            f"LOC by extension (top):\n{loc_summary_for_llm}\n"
+        )
+
+        import litellm
+        prompt = (
+            "You are a senior software analyst. Below are raw statistics from "
+            "an indexed codebase. Write a concise analysis in approximately "
+            "200 words using markdown. Cover:\n"
+            "1. What the codebase appears to do (infer from function names, "
+            "languages, and call patterns)\n"
+            "2. Key functionalities and modules\n"
+            "3. Database interaction footprint\n"
+            "4. Number of components/modules and overall scale\n"
+            "5. A brief architectural observation\n\n"
+            "Do NOT include a title/heading — it is rendered separately.\n"
+            "Do NOT include a LOC table — that is rendered separately.\n\n"
+            "Use bullet points and bold headers. Be specific — cite actual "
+            "numbers from the stats.\n\n"
+            f"### Raw Statistics\n```\n{stats_block}```"
+        )
+
+        response = await litellm.acompletion(
+            model=settings.litellm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=800,
+            **settings.get_litellm_kwargs(),
+        )
+
+        llm_text = (response.choices[0].message.content or "").strip()
+
+        _tearsheet_result = {
+            "summary": llm_text,
+            "total_files": total_files,
+            "total_functions": total_functions,
+            "total_classes": total_classes,
+            "total_loc": loc_grand_total,
+            "total_edges": total_edges,
+            "languages": language_breakdown or "N/A",
+            "top_callees": top_callees or "N/A",
+            "top_callers": top_callers or "N/A",
+            "db_related_files": db_related_functions,
+            "loc_by_ext": sorted_loc,
+        }
+
+        _set_tearsheet_progress(1.0, "Done", done=True)
+        return _tearsheet_result
+
+    except Exception as exc:
+        logger.exception("Tearsheet generation failed")
+        _set_tearsheet_progress(1.0, "Error", done=True)
+        return f"**Error generating tearsheet:** {exc}"
 
 
 async def _validate_all_flows(project_id: int, run_id: int):
@@ -1126,6 +1391,7 @@ def create_ui():
             tab_db_entity = ui.tab("6. DB Entity Checker")
             tab_topic_conv = ui.tab("7. Topic Convergence")
             tab_chonkie = ui.tab("8. Chonkie Chunk POC")
+            tab_modernize = ui.tab("9. Modernization")
 
         with ui.tab_panels(tabs, value=tab_indexer).classes("w-full"):
 
@@ -1172,23 +1438,54 @@ def create_ui():
 
                 source_radio.on_value_change(_toggle_source)
 
-                idx_progress = ui.linear_progress(value=0, show_value=False).classes(
-                    "w-full"
-                )
-                idx_progress.set_visibility(False)
+                index_btn = ui.button("Index Codebase", color="primary", icon="play_arrow")
+
+                idx_card = ui.card().classes("w-full q-mt-sm")
+                idx_card.set_visibility(False)
+                with idx_card:
+                    with ui.row().classes("w-full items-center gap-3 q-mb-sm"):
+                        idx_spinner = ui.spinner("dots", size="lg", color="primary")
+                        with ui.column().classes("gap-0"):
+                            idx_phase_label = ui.label("Initializing...").classes(
+                                "text-subtitle1 text-weight-bold"
+                            )
+                            idx_pct_label = ui.label("0%").classes(
+                                "text-caption text-grey-7"
+                            )
+                    idx_progress = ui.linear_progress(
+                        value=0, show_value=False, color="primary",
+                    ).classes("w-full rounded-borders").style("height: 8px;")
+                    idx_step_log = ui.column().classes("w-full gap-1 q-mt-sm")
+
                 idx_status = ui.markdown("")
-                index_btn = ui.button("Index Codebase", color="primary")
+                idx_status.set_visibility(False)
+
+                _idx_steps_seen: list[str] = []
 
                 async def _on_index_click():
                     index_btn.disable()
-                    idx_progress.set_visibility(True)
-                    idx_status.set_content("Indexing...")
+                    idx_card.set_visibility(True)
+                    idx_status.set_visibility(False)
+                    idx_status.set_content("")
+                    idx_spinner.set_visibility(True)
+                    idx_progress.set_value(0)
+                    idx_phase_label.set_text("Starting...")
+                    idx_pct_label.set_text("0%")
+                    idx_step_log.clear()
+                    _idx_steps_seen.clear()
+
+                    ui.notify(
+                        "Indexing started — this may take a few minutes.",
+                        type="info", position="bottom-right", timeout=4000,
+                    )
 
                     def _progress(pct, desc):
-                        try:
-                            idx_progress.set_value(pct)
-                        except RuntimeError:
-                            pass
+                        _set_progress(pct, desc)
+
+                    poll_timer = ui.timer(0.5, lambda: _idx_poll_progress(
+                        idx_progress, idx_phase_label, idx_pct_label,
+                        idx_step_log, _idx_steps_seen,
+                    ))
 
                     try:
                         if source_radio.value == "Local Folder":
@@ -1200,16 +1497,226 @@ def create_ui():
                                 git_url_input.value, branch_input.value, _progress,
                             )
                     except Exception as exc:
-                        result = f"Error: {exc}"
+                        result = f"**Error:** {exc}"
+
+                    poll_timer.deactivate()
 
                     try:
                         idx_progress.set_value(1.0)
+                        idx_pct_label.set_text("100%")
+                        idx_spinner.set_visibility(False)
+                        idx_phase_label.set_text("Complete")
+
                         idx_status.set_content(result)
+                        idx_status.set_visibility(True)
+                        idx_card.set_visibility(False)
                         index_btn.enable()
+
+                        is_error = isinstance(result, str) and "error" in result.lower()
+                        ui.notify(
+                            "Indexing failed — see details below." if is_error
+                            else "Indexing complete!",
+                            type="negative" if is_error else "positive",
+                            position="bottom-right", timeout=6000,
+                        )
+                    except RuntimeError:
+                        pass
+
+                def _idx_poll_progress(bar, phase_lbl, pct_lbl, log_col, seen):
+                    state = _get_progress()
+                    pct = state["pct"]
+                    step = state["step"]
+                    try:
+                        bar.set_value(pct)
+                        pct_lbl.set_text(f"{int(pct * 100)}%")
+                        if step:
+                            phase_lbl.set_text(step)
+                        if step and step not in seen:
+                            seen.append(step)
+                            with log_col:
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.icon("check_circle", color="positive", size="xs")
+                                    ui.label(step).classes("text-caption")
                     except RuntimeError:
                         pass
 
                 index_btn.on_click(_on_index_click)
+
+                # ───────────────────────────────────────────────────────
+                # Tearsheet — holistic codebase overview
+                # ───────────────────────────────────────────────────────
+                ui.separator().classes("q-my-md")
+
+                tearsheet_section = ui.column().classes("w-full gap-2")
+                with tearsheet_section:
+                    ui.markdown(
+                        "### Codebase Tearsheet\n"
+                        "Generate a holistic overview of the indexed codebase: "
+                        "functionalities, DB calls, modules/components, and architecture."
+                    )
+
+                    tearsheet_btn = ui.button(
+                        "Generate Tearsheet", icon="summarize", color="teal",
+                    )
+                    tearsheet_progress = ui.linear_progress(
+                        value=0, show_value=False,
+                    ).classes("w-full")
+                    tearsheet_progress.set_visibility(False)
+                    tearsheet_step_label = ui.label("")
+
+                    tearsheet_card_container = ui.column().classes("w-full")
+                    tearsheet_card_container.set_visibility(bool(_tearsheet_result))
+
+                    def _render_tearsheet(data: dict, container):
+                        """Render structured tearsheet data as a nutrition-facts-style card."""
+                        container.clear()
+                        with container:
+                            with ui.card().classes(
+                                "w-full q-pa-none"
+                            ).style(
+                                "border: 8px solid #212121; border-radius: 4px; "
+                                "max-width: 720px;"
+                            ):
+                                with ui.column().classes("w-full q-pa-md gap-0"):
+                                    # --- Title ---
+                                    ui.label("Codebase Tearsheet").classes(
+                                        "text-h4 text-weight-bolder"
+                                    ).style("line-height: 1.1; letter-spacing: -0.5px;")
+                                    ui.separator().classes("q-my-xs").style(
+                                        "border-top: 12px solid #212121;"
+                                    )
+
+                                    # --- Key metrics row ---
+                                    def _metric_block(value, label, bold=False):
+                                        with ui.column().classes("items-center q-px-sm gap-0"):
+                                            cls = "text-h5 text-weight-bolder" if bold else "text-h6 text-weight-bold"
+                                            ui.label(value).classes(cls)
+                                            ui.label(label).classes(
+                                                "text-caption text-grey-7"
+                                            ).style("white-space: nowrap;")
+
+                                    with ui.row().classes(
+                                        "w-full justify-around q-py-sm"
+                                    ):
+                                        _metric_block(f"{data['total_loc']:,}", "Lines of Code", bold=True)
+                                        _metric_block(f"{data['total_files']:,}", "Files")
+                                        _metric_block(f"{data['total_functions']:,}", "Functions")
+                                        _metric_block(f"{data['total_classes']:,}", "Classes")
+                                        _metric_block(f"{data['total_edges']:,}", "Call Edges")
+
+                                    ui.separator().classes("q-my-xs").style(
+                                        "border-top: 4px solid #212121;"
+                                    )
+
+                                    # --- Detail rows (nutrition-label style) ---
+                                    def _detail_row(label, value, thick=False):
+                                        border = "border-top: 3px solid #212121;" if thick else "border-top: 1px solid #bdbdbd;"
+                                        with ui.row().classes(
+                                            "w-full justify-between items-center q-py-xs q-px-xs"
+                                        ).style(border):
+                                            ui.label(label).classes("text-weight-bold text-body2")
+                                            ui.label(str(value)).classes("text-body2 text-right").style(
+                                                "max-width: 65%; word-break: break-word;"
+                                            )
+
+                                    _detail_row("Languages", data["languages"], thick=True)
+                                    _detail_row("DB-Related Files", f"{data['db_related_files']:,}")
+                                    _detail_row("Most-Called Functions", data["top_callees"])
+                                    _detail_row("Top Callers", data["top_callers"])
+
+                                    ui.separator().classes("q-my-xs").style(
+                                        "border-top: 8px solid #212121;"
+                                    )
+
+                                    # --- LOC by extension table ---
+                                    ui.label("Lines of Code by File Type").classes(
+                                        "text-subtitle1 text-weight-bolder q-pt-xs"
+                                    )
+                                    loc_data = data.get("loc_by_ext", [])
+                                    total_loc = data["total_loc"] or 1
+                                    columns = [
+                                        {"name": "ext", "label": "Extension", "field": "ext", "align": "left", "sortable": True},
+                                        {"name": "files", "label": "Files", "field": "files", "align": "right", "sortable": True},
+                                        {"name": "loc", "label": "Lines of Code", "field": "loc", "align": "right", "sortable": True},
+                                        {"name": "pct", "label": "% of Total", "field": "pct", "align": "right", "sortable": True},
+                                    ]
+                                    rows = []
+                                    for ext, info in loc_data:
+                                        pct = (info["loc"] / total_loc * 100) if total_loc else 0
+                                        rows.append({
+                                            "ext": ext,
+                                            "files": f"{info['files']:,}",
+                                            "loc": f"{info['loc']:,}",
+                                            "pct": f"{pct:.1f}%",
+                                        })
+                                    rows.append({
+                                        "ext": "Total",
+                                        "files": f"{sum(v['files'] for _, v in loc_data):,}",
+                                        "loc": f"{data['total_loc']:,}",
+                                        "pct": "100%",
+                                    })
+                                    ui.table(
+                                        columns=columns, rows=rows, row_key="ext",
+                                    ).classes("w-full").props(
+                                        "dense flat bordered separator=cell hide-bottom"
+                                    )
+
+                                    ui.separator().classes("q-my-xs").style(
+                                        "border-top: 4px solid #212121;"
+                                    )
+
+                                    # --- LLM summary ---
+                                    ui.label("Analysis").classes(
+                                        "text-subtitle1 text-weight-bolder q-pt-xs"
+                                    )
+                                    ui.markdown(data["summary"]).classes("text-body2")
+
+                    if _tearsheet_result:
+                        _render_tearsheet(_tearsheet_result, tearsheet_card_container)
+
+                    async def _on_tearsheet_click():
+                        tearsheet_btn.disable()
+                        tearsheet_progress.set_visibility(True)
+                        tearsheet_card_container.set_visibility(False)
+                        _set_tearsheet_progress(0.0, "Starting...")
+
+                        timer = ui.timer(
+                            0.4,
+                            lambda: (
+                                tearsheet_progress.set_value(
+                                    _get_tearsheet_progress()["pct"]
+                                ),
+                                tearsheet_step_label.set_text(
+                                    _get_tearsheet_progress()["step"]
+                                ),
+                            ),
+                        )
+
+                        try:
+                            result = await _generate_tearsheet()
+                        except Exception as exc:
+                            result = None
+                            logger.exception("Tearsheet generation failed in UI")
+                        finally:
+                            timer.deactivate()
+
+                        try:
+                            tearsheet_progress.set_value(1.0)
+                            tearsheet_step_label.set_text("")
+                            tearsheet_progress.set_visibility(False)
+                            if isinstance(result, dict):
+                                _render_tearsheet(result, tearsheet_card_container)
+                                tearsheet_card_container.set_visibility(True)
+                            elif isinstance(result, str):
+                                tearsheet_card_container.clear()
+                                with tearsheet_card_container:
+                                    ui.markdown(result)
+                                tearsheet_card_container.set_visibility(True)
+                            tearsheet_btn.enable()
+                        except RuntimeError:
+                            pass
+
+                    tearsheet_btn.on_click(_on_tearsheet_click)
 
             # ═══════════════════════════════════════════════════════════
             # Tab 2: Validate
@@ -3189,3 +3696,489 @@ def create_ui():
                     chonkie_run_btn.enable()
 
                 chonkie_run_btn.on_click(_on_run_chonkie_comparison)
+
+            # ═══════════════════════════════════════════════════════════
+            # Tab 9: Modernization Pipeline
+            # ═══════════════════════════════════════════════════════════
+            with ui.tab_panel(tab_modernize):
+                ui.markdown(
+                    "### Codebase Modernization Pipeline\n"
+                    "Analyze a legacy codebase and generate a modernized frontend + backend. "
+                    "The pipeline runs in **3 phases** with approval gates.\n\n"
+                    "**Phase 1** (Planning): Architecture → Inventory → Roadmap\n"
+                    "**Phase 2** (Execution): Code Generation → Build\n"
+                    "**Phase 3** (Validation): Testing → Parity Verification"
+                )
+
+                # ── Status banner (shows running / completed state on reconnect) ──
+                _phase_labels = {
+                    "not_started": "",
+                    "phase1_running": "Phase 1 is running in the background...",
+                    "phase1_complete": "Phase 1 complete. Review results, then run Phase 2.",
+                    "phase2_running": "Phase 2 is running in the background...",
+                    "phase2_complete": "Phase 2 complete. Review results, then run Phase 3.",
+                    "phase3_running": "Phase 3 is running in the background...",
+                    "phase3_complete": "All phases complete.",
+                }
+                _cur_phase = _mod_state.get("phase", "not_started")
+                _banner_text = _phase_labels.get(_cur_phase, "")
+                if _banner_text:
+                    mod_status_banner = ui.label(_banner_text).classes(
+                        "text-subtitle1 text-weight-medium q-pa-sm "
+                        "bg-blue-1 rounded-borders w-full"
+                    )
+                else:
+                    mod_status_banner = ui.label("").classes("hidden")
+
+                # ── Configuration form ──
+                with ui.card().classes("w-full q-pa-md"):
+                    ui.label("Configuration").classes("text-h6")
+
+                    with ui.row().classes("w-full gap-4"):
+                        mod_source_input = ui.input(
+                            label="Source Codebase Root",
+                            placeholder="Path to cloned legacy repo",
+                            value=str(settings.codebase_root),
+                        ).classes("flex-grow")
+                        mod_index_input = ui.input(
+                            label="Code Index DB Path",
+                            placeholder=".trustbot_git_index.db path",
+                        ).classes("flex-grow")
+
+                    with ui.row().classes("w-full gap-4"):
+                        mod_frontend = ui.select(
+                            label="Target Frontend",
+                            options=["react-typescript", "react", "angular", "vue"],
+                            value="react-typescript",
+                        ).classes("flex-grow")
+                        mod_backend = ui.select(
+                            label="Target Backend",
+                            options=[
+                                "aspnet-core-webapi",
+                                "aspnet-minimal",
+                                "nodejs-express",
+                                "fastapi",
+                            ],
+                            value="aspnet-core-webapi",
+                        ).classes("flex-grow")
+
+                    with ui.row().classes("w-full gap-4"):
+                        mod_component = ui.radio(
+                            ["maximize_reuse", "page_per_component", "atomic_design"],
+                            value="maximize_reuse",
+                        ).props("inline").classes("flex-grow")
+                        ui.label("Component Strategy").classes("text-caption")
+
+                    with ui.row().classes("w-full gap-4"):
+                        mod_state_mgmt = ui.select(
+                            label="State Management",
+                            options=["zustand", "redux", "react-context", "none"],
+                            value="zustand",
+                        ).classes("flex-grow")
+                        mod_css = ui.select(
+                            label="CSS Framework",
+                            options=["tailwind", "mui", "bootstrap", "custom"],
+                            value="tailwind",
+                        ).classes("flex-grow")
+                        mod_api = ui.radio(
+                            ["rest", "graphql"],
+                            value="rest",
+                        ).props("inline").classes("flex-grow")
+                        ui.label("API Style").classes("text-caption")
+
+                    with ui.row().classes("w-full gap-4"):
+                        mod_output = ui.input(
+                            label="Output Directory",
+                            value=str(settings.modernization_output_dir),
+                        ).classes("flex-grow")
+                        mod_retries = ui.number(
+                            label="Max Build Retries",
+                            value=settings.modernization_max_build_retries,
+                            min=1, max=20,
+                        ).classes("w-32")
+
+                    mod_extra = ui.textarea(
+                        label="Additional Requirements",
+                        placeholder="Any extra constraints, preferences, or notes...",
+                    ).classes("w-full")
+
+                # ── Phase controls ──
+                with ui.row().classes("w-full gap-4 items-center q-mt-md"):
+                    mod_phase1_btn = ui.button(
+                        "Run Phase 1: Planning", color="primary"
+                    )
+                    mod_phase2_btn = ui.button(
+                        "Approve & Run Phase 2: Code Generation", color="positive"
+                    )
+                    mod_phase3_btn = ui.button(
+                        "Approve & Run Phase 3: Testing", color="deep-purple"
+                    )
+
+                # Set button enabled/disabled based on restored state
+                _p = _mod_state.get("phase", "not_started")
+                if _p in ("phase1_running", "phase2_running", "phase3_running"):
+                    mod_phase1_btn.disable()
+                    mod_phase2_btn.disable()
+                    mod_phase3_btn.disable()
+                elif _p == "phase1_complete":
+                    mod_phase2_btn.enable()
+                    mod_phase3_btn.disable()
+                elif _p == "phase2_complete":
+                    mod_phase2_btn.disable()
+                    mod_phase3_btn.enable()
+                elif _p == "phase3_complete":
+                    mod_phase2_btn.disable()
+                    mod_phase3_btn.disable()
+                else:
+                    mod_phase2_btn.disable()
+                    mod_phase3_btn.disable()
+
+                mod_progress_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
+                mod_step_label = ui.label("").classes("text-caption")
+
+                # ── Context pipeline visualization ──
+                from trustbot.ui.context_viz import build_context_svg, ContextVizState
+                _viz_state = ContextVizState()
+                with ui.expansion(
+                    "Context Pipeline", icon="hub", value=True,
+                ).classes("w-full"):
+                    mod_context_viz = ui.html(
+                        build_context_svg(_viz_state)
+                    ).classes("w-full").style(
+                        "aspect-ratio: 900/480; border-radius: 12px; overflow: hidden;"
+                    )
+
+                # ── Live log panel ──
+                with ui.expansion("Pipeline Log", icon="terminal").classes("w-full"):
+                    mod_log_panel = ui.log(max_lines=200).classes("w-full").style(
+                        "height: 300px; background: #1e1e1e; color: #4ec9b0; "
+                        "font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 12px;"
+                    )
+                    # Restore existing log lines on page load (reconnect shows history)
+                    with _mod_lock:
+                        _existing_logs = list(_mod_log_lines)
+                    for _lvl, _msg in _existing_logs:
+                        _cls = {"error": "text-red", "success": "text-green", "cmd": "text-yellow"}.get(_lvl, "")
+                        mod_log_panel.push(_msg, classes=_cls)
+
+                # ── Results area ──
+                # Restore from module-level state if a previous run completed
+                _p1 = _mod_state.get("p1")
+                _p2 = _mod_state.get("p2")
+                _p3 = _mod_state.get("p3")
+
+                mod_results_section = ui.column().classes("w-full gap-4 q-mt-md")
+                with mod_results_section:
+                    mod_arch_card = ui.expansion("Architecture Spec", icon="architecture").classes("w-full")
+                    with mod_arch_card:
+                        mod_arch_md = ui.markdown(
+                            _p1.architecture.markdown_document if _p1 else "*Run Phase 1 to generate...*"
+                        )
+
+                    mod_inv_card = ui.expansion("Inventory Report", icon="inventory").classes("w-full")
+                    with mod_inv_card:
+                        mod_inv_md = ui.markdown(
+                            _p1.inventory.markdown_document if _p1 else "*Run Phase 1 to generate...*"
+                        )
+
+                    mod_road_card = ui.expansion("Migration Roadmap", icon="map").classes("w-full")
+                    with mod_road_card:
+                        mod_road_md = ui.markdown(
+                            _p1.roadmap.markdown_document if _p1 else "*Run Phase 1 to generate...*"
+                        )
+
+                    mod_codegen_card = ui.expansion("Code Generation Summary", icon="code").classes("w-full")
+                    with mod_codegen_card:
+                        mod_codegen_md = ui.markdown(
+                            _p2.codegen.summary_markdown if _p2 else "*Run Phase 2 to generate...*"
+                        )
+
+                    mod_build_card = ui.expansion("Build Report", icon="build").classes("w-full")
+                    with mod_build_card:
+                        mod_build_md = ui.markdown(
+                            _p2.build.summary_markdown if _p2 else "*Run Phase 2 to generate...*"
+                        )
+
+                    mod_test_card = ui.expansion("Test Report", icon="science").classes("w-full")
+                    with mod_test_card:
+                        mod_test_md = ui.markdown(
+                            _p3.tests.summary_markdown if _p3 else "*Run Phase 3 to generate...*"
+                        )
+
+                    mod_parity_card = ui.expansion("Parity Report", icon="compare_arrows").classes("w-full")
+                    with mod_parity_card:
+                        mod_parity_md = ui.markdown(
+                            _p3.parity.markdown_document if _p3 else "*Run Phase 3 to generate...*"
+                        )
+
+                # Track what the timer has already pushed to avoid redundant widget updates.
+                _last_synced = {
+                    "phase": None, "p1_id": None, "p2_id": None, "p3_id": None,
+                    "log_count": len(_existing_logs),
+                    "viz_log_count": 0,
+                }
+
+                def _poll_mod_progress():
+                    """Polls progress, syncs results/buttons, and streams log lines."""
+                    prog = _get_mod_progress()
+                    mod_progress_bar.set_value(prog["pct"])
+                    mod_step_label.set_text(prog["step"])
+
+                    # Sync new log lines to the ui.log widget
+                    with _mod_lock:
+                        current_log_snapshot = list(_mod_log_lines)
+                    new_log_count = len(current_log_snapshot)
+                    if new_log_count > _last_synced["log_count"]:
+                        for lvl, msg in current_log_snapshot[_last_synced["log_count"]:]:
+                            cls = {"error": "text-red", "success": "text-green", "cmd": "text-yellow"}.get(lvl, "")
+                            mod_log_panel.push(msg, classes=cls)
+                        _last_synced["log_count"] = new_log_count
+
+                    # Update context pipeline visualization from log lines
+                    if new_log_count > _last_synced["viz_log_count"]:
+                        active = []
+                        for _, msg in current_log_snapshot:
+                            if msg.startswith("Wrote "):
+                                parts = msg.split(" ", 1)
+                                if len(parts) > 1:
+                                    fpath = parts[1].split(" (")[0]
+                                    active.append(fpath)
+                        _viz_state.phase = _mod_state.get("phase", "not_started")
+                        _viz_state.active_files = active[-12:]
+                        _viz_state.total_sources = max(len(current_log_snapshot), 1)
+                        _viz_state.relevant_sources = len(active)
+                        mod_context_viz.set_content(build_context_svg(_viz_state))
+                        _last_synced["viz_log_count"] = new_log_count
+
+                    cur_phase = _mod_state.get("phase", "not_started")
+                    p1 = _mod_state.get("p1")
+                    p2 = _mod_state.get("p2")
+                    p3 = _mod_state.get("p3")
+
+                    phase_changed = _last_synced["phase"] != cur_phase
+                    p1_changed = _last_synced["p1_id"] != id(p1)
+                    p2_changed = _last_synced["p2_id"] != id(p2)
+                    p3_changed = _last_synced["p3_id"] != id(p3)
+
+                    if not (phase_changed or p1_changed or p2_changed or p3_changed):
+                        return
+
+                    # Push result content to widgets when new results arrive
+                    if p1 and p1_changed:
+                        mod_arch_md.set_content(p1.architecture.markdown_document or "*No content generated*")
+                        mod_inv_md.set_content(p1.inventory.markdown_document or "*No content generated*")
+                        mod_road_md.set_content(p1.roadmap.markdown_document or "*No content generated*")
+
+                    if p2 and p2_changed:
+                        mod_codegen_md.set_content(p2.codegen.summary_markdown or "*No content*")
+                        mod_build_md.set_content(p2.build.summary_markdown or "*No content*")
+                        _viz_state.active_files = [
+                            a.file_path for a in p2.codegen.artifacts[:12]
+                        ]
+                        _viz_state.total_sources = len(p2.codegen.artifacts)
+                        _viz_state.relevant_sources = len(p2.codegen.artifacts)
+                        mod_context_viz.set_content(build_context_svg(_viz_state))
+
+                    if p3 and p3_changed:
+                        mod_test_md.set_content(p3.tests.summary_markdown or "*No content*")
+                        mod_parity_md.set_content(p3.parity.markdown_document or "*No content*")
+
+                    # Always sync button enabled/disabled to match phase
+                    if cur_phase.endswith("_running"):
+                        mod_phase1_btn.disable()
+                        mod_phase2_btn.disable()
+                        mod_phase3_btn.disable()
+                    elif cur_phase == "phase1_complete":
+                        mod_phase1_btn.enable()
+                        mod_phase2_btn.enable()
+                        mod_phase3_btn.disable()
+                    elif cur_phase == "phase2_complete":
+                        mod_phase1_btn.enable()
+                        mod_phase2_btn.disable()
+                        mod_phase3_btn.enable()
+                    elif cur_phase == "phase3_complete":
+                        mod_phase1_btn.enable()
+                        mod_phase2_btn.disable()
+                        mod_phase3_btn.disable()
+                    else:
+                        mod_phase1_btn.enable()
+                        mod_phase2_btn.disable()
+                        mod_phase3_btn.disable()
+
+                    # Update status banner
+                    _banner = {
+                        "phase1_running": "Phase 1 is running in the background...",
+                        "phase1_complete": "Phase 1 complete. Review results, then run Phase 2.",
+                        "phase2_running": "Phase 2 is running in the background...",
+                        "phase2_complete": "Phase 2 complete. Review results, then run Phase 3.",
+                        "phase3_running": "Phase 3 is running in the background...",
+                        "phase3_complete": "All phases complete.",
+                    }.get(cur_phase, "")
+                    mod_status_banner.set_text(_banner)
+                    if _banner:
+                        mod_status_banner.classes(remove="hidden")
+                    else:
+                        mod_status_banner.classes(add="hidden")
+
+                    _last_synced["phase"] = cur_phase
+                    _last_synced["p1_id"] = id(p1)
+                    _last_synced["p2_id"] = id(p2)
+                    _last_synced["p3_id"] = id(p3)
+
+                mod_timer = ui.timer(0.5, _poll_mod_progress)
+
+                def _build_mod_config():
+                    from trustbot.models.modernization import (
+                        ComponentStrategy,
+                        APIStyle,
+                        ModernizationConfig,
+                    )
+                    return ModernizationConfig(
+                        source_index_path=mod_index_input.value or "",
+                        codebase_root=mod_source_input.value or str(settings.codebase_root),
+                        target_frontend=mod_frontend.value or "react-typescript",
+                        target_backend=mod_backend.value or "aspnet-core-webapi",
+                        component_strategy=ComponentStrategy(mod_component.value or "maximize_reuse"),
+                        state_management=mod_state_mgmt.value or "zustand",
+                        css_framework=mod_css.value or "tailwind",
+                        api_style=APIStyle(mod_api.value or "rest"),
+                        output_directory=mod_output.value or str(settings.modernization_output_dir),
+                        max_build_retries=int(mod_retries.value or 5),
+                        additional_requirements=mod_extra.value or "",
+                    )
+
+                def _get_or_create_pipeline(config):
+                    global _mod_pipeline
+                    if _mod_pipeline is not None:
+                        return _mod_pipeline
+                    from trustbot.index.code_index import CodeIndex
+                    from trustbot.tools.build_tool import BuildTool
+                    from trustbot.agents.modernization.pipeline import ModernizationPipeline
+
+                    idx_path = config.source_index_path
+                    if not idx_path:
+                        if _git_index is not None:
+                            code_idx = _git_index
+                        else:
+                            code_idx = CodeIndex(
+                                db_path=Path(config.codebase_root) / ".trustbot_git_index.db"
+                            )
+                    else:
+                        code_idx = CodeIndex(db_path=Path(idx_path))
+
+                    try:
+                        reg = _get_registry()
+                        build_tool = reg.get("build")
+                    except Exception:
+                        build_tool = BuildTool()
+
+                    _mod_pipeline = ModernizationPipeline(
+                        code_index=code_idx,
+                        build_tool=build_tool,
+                    )
+                    return _mod_pipeline
+
+                async def _run_phase1_bg(config, pipeline):
+                    """Phase 1 background task. Config/pipeline captured by caller."""
+                    try:
+                        result = await pipeline.run_phase1(
+                            config,
+                            progress_callback=lambda pct, msg: _set_mod_progress(pct, msg),
+                        )
+                        _mod_state["p1"] = result
+                        _mod_state["phase"] = "phase1_complete"
+                        _set_mod_progress(1.0, "Phase 1 complete!", done=True)
+                    except Exception as e:
+                        _mod_state["phase"] = "phase1_complete"
+                        _set_mod_progress(0, f"Phase 1 error: {e}", done=True)
+                        logger.exception("Modernization Phase 1 failed")
+
+                async def _run_phase2_bg(config, pipeline, p1_result):
+                    try:
+                        result = await pipeline.run_phase2(
+                            p1_result,
+                            config,
+                            progress_callback=lambda pct, msg: _set_mod_progress(pct, msg),
+                            log_callback=_append_mod_log,
+                        )
+                        _mod_state["p2"] = result
+                        _mod_state["phase"] = "phase2_complete"
+                        _set_mod_progress(1.0, "Phase 2 complete!", done=True)
+                    except Exception as e:
+                        _mod_state["phase"] = "phase2_complete"
+                        _append_mod_log(f"Phase 2 error: {e}", "error")
+                        _set_mod_progress(0, f"Phase 2 error: {e}", done=True)
+                        logger.exception("Modernization Phase 2 failed")
+
+                async def _run_phase3_bg(config, pipeline, p1_result, p2_result):
+                    try:
+                        result = await pipeline.run_phase3(
+                            p1_result,
+                            p2_result,
+                            config,
+                            progress_callback=lambda pct, msg: _set_mod_progress(pct, msg),
+                            log_callback=_append_mod_log,
+                        )
+                        _mod_state["p3"] = result
+                        _mod_state["phase"] = "phase3_complete"
+                        _set_mod_progress(1.0, "Phase 3 complete!", done=True)
+                    except Exception as e:
+                        _mod_state["phase"] = "phase3_complete"
+                        _append_mod_log(f"Phase 3 error: {e}", "error")
+                        _set_mod_progress(0, f"Phase 3 error: {e}", done=True)
+                        logger.exception("Modernization Phase 3 failed")
+
+                def _on_mod_phase1():
+                    if _mod_state.get("phase", "").endswith("_running"):
+                        return
+                    config = _build_mod_config()
+                    pipeline = _get_or_create_pipeline(config)
+                    _mod_state["phase"] = "phase1_running"
+                    mod_phase1_btn.disable()
+                    mod_phase2_btn.disable()
+                    mod_phase3_btn.disable()
+                    _set_mod_progress(0, "Starting Phase 1...")
+                    background_tasks.create(
+                        _run_phase1_bg(config, pipeline), name="mod_phase1"
+                    )
+
+                def _on_mod_phase2():
+                    p1 = _mod_state.get("p1")
+                    if p1 is None:
+                        _set_mod_progress(0, "Phase 1 must complete first", done=True)
+                        return
+                    if _mod_state.get("phase", "").endswith("_running"):
+                        return
+                    config = _build_mod_config()
+                    pipeline = _get_or_create_pipeline(config)
+                    _mod_state["phase"] = "phase2_running"
+                    mod_phase1_btn.disable()
+                    mod_phase2_btn.disable()
+                    mod_phase3_btn.disable()
+                    _set_mod_progress(0, "Starting Phase 2...")
+                    background_tasks.create(
+                        _run_phase2_bg(config, pipeline, p1), name="mod_phase2"
+                    )
+
+                def _on_mod_phase3():
+                    p1 = _mod_state.get("p1")
+                    p2 = _mod_state.get("p2")
+                    if p1 is None or p2 is None:
+                        _set_mod_progress(0, "Phases 1 and 2 must complete first", done=True)
+                        return
+                    if _mod_state.get("phase", "").endswith("_running"):
+                        return
+                    config = _build_mod_config()
+                    pipeline = _get_or_create_pipeline(config)
+                    _mod_state["phase"] = "phase3_running"
+                    mod_phase1_btn.disable()
+                    mod_phase2_btn.disable()
+                    mod_phase3_btn.disable()
+                    _set_mod_progress(0, "Starting Phase 3...")
+                    background_tasks.create(
+                        _run_phase3_bg(config, pipeline, p1, p2), name="mod_phase3"
+                    )
+
+                mod_phase1_btn.on_click(_on_mod_phase1)
+                mod_phase2_btn.on_click(_on_mod_phase2)
+                mod_phase3_btn.on_click(_on_mod_phase3)

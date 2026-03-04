@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     def llm_max_tokens(self) -> int:
         return self.trustbot_llm_max_tokens
 
+    # Modernization pipeline
+    modernization_output_dir: Path = Path("./modernization_output")
+    modernization_max_build_retries: int = 5
+    modernization_build_timeout_seconds: int = 300
+    modernization_target_frontend: str = "react-typescript"
+    modernization_target_backend: str = "aspnet-core-webapi"
+
     # Multi-agent / job queue
     redis_url: str = "redis://localhost:6379/0"
     enable_celery: bool = False

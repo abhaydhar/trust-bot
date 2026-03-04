@@ -1,0 +1,108 @@
+---
+description: TrustBot agent architecture principles — state management, async patterns, tool layer, and NiceGUI integration
+globs: trustbot/**/*.py
+alwaysApply: false
+---
+
+# TrustBot Agent Architecture Principles
+
+## State Must Be Module-Level
+
+All pipeline instances, agent results, and progress trackers MUST be module-level globals in `trustbot/ui/app.py`, never local variables inside `create_ui()` or tab panel scopes.
+
+NiceGUI re-executes the page builder on every browser reconnect. Local variables are destroyed. Module-level globals survive reconnects.
+
+```python
+# WRONG — lost on page reload
+with ui.tab_panel(my_tab):
+    _my_pipeline = None
+    _my_state = {}
+
+# CORRECT — survives page reload
+_my_pipeline = None
+_my_state: dict = {"phase": "not_started"}
+
+def create_ui():
+    ...
+    with ui.tab_panel(my_tab):
+        # read from _my_state to restore UI
+```
+
+Existing examples: `_pipeline`, `_git_index`, `_orchestrator`, `_mod_pipeline`, `_mod_state`.
+
+## Restore UI From Global State on Page Load
+
+When building tab UI, always check if module-level state already has results and populate widgets from it. This handles browser refresh, tab switching, and reconnect.
+
+```python
+_p1 = _my_state.get("result")
+mod_md = ui.markdown(_p1.document if _p1 else "*Not yet run*")
+```
+
+Also restore button enabled/disabled state based on the current phase.
+
+## Long-Running Work Must Use background_tasks
+
+Any operation that takes more than a few seconds (LLM calls, builds, indexing) MUST run via `background_tasks.create()`, NOT awaited directly in a click handler. Blocking the NiceGUI event loop kills the websocket heartbeat, causing the browser to reconnect and lose UI state.
+
+```python
+# WRONG — blocks websocket, causes disconnect
+async def _on_click():
+    result = await pipeline.run_phase(...)  # 60+ seconds
+
+# CORRECT — runs in background, websocket stays alive
+async def _run_bg():
+    result = await pipeline.run_phase(...)
+    _my_state["result"] = result
+
+def _on_click():
+    background_tasks.create(_run_bg(), name="my_task")
+```
+
+Use a `ui.timer` polling `_my_progress` dict to show progress in the UI.
+
+## Agent Class Pattern
+
+Every agent class follows this contract:
+
+- Constructor receives tools/indexes, not config. Config is a method parameter.
+- Main method is `async def run(...)` returning a Pydantic model.
+- Accept an optional `progress_callback(pct: float, msg: str)` for UI feedback.
+- No direct agent-to-agent calls. Agents are independent; the pipeline orchestrates.
+- LLM calls go through `litellm.acompletion()` with `settings.get_litellm_kwargs()`.
+- Always provide a rule-based/template fallback when the LLM call fails.
+
+## Pipeline Orchestration Pattern
+
+Pipelines chain agents and pass outputs between them:
+
+- Each phase method returns a typed Pydantic result model.
+- Pipelines save state to disk (JSON) after each phase for resume capability.
+- Progress callbacks are scoped per-agent within the pipeline (e.g., `0.0–0.33` for agent 1, `0.33–0.66` for agent 2).
+
+## Tool Layer
+
+Agents access external systems only through tools (`BaseTool` subclasses):
+
+- Tools are registered in `ToolRegistry` in `main.py`.
+- Tools provide `async def initialize()` and `async def shutdown()`.
+- Tools have built-in audit logging via `_record_call()`.
+- New tools: subclass `BaseTool`, register in `initialize_app()`.
+
+## Pydantic Models for All Inter-Agent Data
+
+All data passed between agents MUST be Pydantic `BaseModel` subclasses in `trustbot/models/`. No raw dicts for structured data. This ensures type safety and JSON serialization for state persistence.
+
+## Progress Feedback via Shared Dict + Lock
+
+Use a module-level dict + `threading.Lock` for progress. The UI polls it with `ui.timer`. Never pass NiceGUI widget references into background tasks — they may belong to a dead client.
+
+```python
+_my_progress = {"pct": 0.0, "step": ""}
+_my_lock = threading.Lock()
+
+def _set_progress(pct, step):
+    with _my_lock:
+        _my_progress["pct"] = pct
+        _my_progress["step"] = step
+```
