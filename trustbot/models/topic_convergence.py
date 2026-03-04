@@ -56,6 +56,7 @@ class TopicAnalysisReport(BaseModel):
     analyses: list[NodeTopicAnalysis] = Field(default_factory=list)
     duplicate_groups: dict[str, list[str]] = Field(default_factory=dict)
     journey_chains: dict[str, list[str]] = Field(default_factory=dict)
+    journey_chain_trees: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
 
 
 class TopicChangeRecord(BaseModel):

@@ -1533,6 +1533,10 @@ def create_ui():
                         "Run Coverage Audit", color="secondary",
                         icon="fact_check",
                     )
+                    yaml_btn = ui.button(
+                        "Download Neo4j YAML", color="grey",
+                        icon="download",
+                    )
                 audit_progress = ui.linear_progress(
                     value=0, show_value=False,
                 ).classes("w-full")
@@ -1688,6 +1692,41 @@ def create_ui():
                         audit_progress.set_value(1.0)
 
                 audit_btn.on_click(_on_audit_click)
+
+                async def _on_yaml_click():
+                    p_str = (project_id_input.value or "").strip()
+                    r_str = (run_id_input.value or "").strip()
+                    if not p_str or not r_str:
+                        ui.notify("Enter Project ID and Run ID first.", type="warning")
+                        return
+                    try:
+                        project_id = int(p_str)
+                        run_id = int(r_str)
+                    except ValueError:
+                        ui.notify("Project ID and Run ID must be integers.", type="warning")
+                        return
+
+                    yaml_btn.disable()
+                    try:
+                        registry = await _get_registry_async()
+                        neo4j_tool = registry.get("neo4j")
+                        from trustbot.agents.coverage_audit_agent import (
+                            CoverageAuditAgent,
+                        )
+                        agent = CoverageAuditAgent(
+                            neo4j_tool=neo4j_tool,
+                            code_index=_git_index,
+                        )
+                        yaml_str = await agent.dump_neo4j_yaml(project_id, run_id)
+                        filename = f"neo4j_report_p{project_id}_r{run_id}.yaml"
+                        ui.download(yaml_str.encode("utf-8"), filename)
+                    except Exception as exc:
+                        logger.exception("Neo4j YAML dump failed")
+                        ui.notify(f"YAML dump failed: {exc}", type="negative")
+                    finally:
+                        yaml_btn.enable()
+
+                yaml_btn.on_click(_on_yaml_click)
 
             # ═══════════════════════════════════════════════════════════
             # Tab 3: Chunk Visualizer
@@ -2470,10 +2509,42 @@ def create_ui():
                         if not report.journey_chains:
                             ui.label("No journey chains found.").classes("text-italic")
                             return
+
+                        def _build_tree_lines(adj, topic, depth=0, visited=None):
+                            """Recursively build indented tree lines with cycle detection."""
+                            if visited is None:
+                                visited = set()
+                            indent = "    " * depth
+                            prefix = "├── " if depth > 0 else ""
+                            lines = [f"{indent}{prefix}{topic}"]
+                            if topic in visited:
+                                lines[-1] += " (recursive)"
+                                return lines
+                            visited = visited | {topic}
+                            children = adj.get(topic, [])
+                            for child in children:
+                                lines.extend(_build_tree_lines(adj, child, depth + 1, visited))
+                            return lines
+
                         for ef_key, topics in report.journey_chains.items():
                             with ui.expansion(f"Flow: {ef_key}").classes("w-full"):
-                                chain_str = " → ".join(topics)
-                                ui.label(f"Current: {chain_str}").classes("text-body2")
+                                tree_adj = getattr(report, "journey_chain_trees", {}).get(ef_key, {})
+                                if tree_adj:
+                                    all_children = set()
+                                    for ch_list in tree_adj.values():
+                                        all_children.update(ch_list)
+                                    roots = [t for t in topics if t not in all_children]
+                                    if not roots:
+                                        roots = topics[:1]
+                                    tree_lines = []
+                                    for root in roots:
+                                        tree_lines.extend(_build_tree_lines(tree_adj, root))
+                                    current_tree_str = "\n".join(tree_lines)
+                                    ui.label("Current:").classes("text-body2 text-bold")
+                                    ui.html(f"<pre style='margin:0;font-size:0.85em'>{current_tree_str}</pre>")
+                                else:
+                                    chain_str = " → ".join(topics)
+                                    ui.label(f"Current: {chain_str}").classes("text-body2")
 
                                 chain_analyses = [
                                     a for a in report.analyses
@@ -2482,13 +2553,37 @@ def create_ui():
                                 chain_analyses.sort(key=lambda a: a.chain_position or 0)
 
                                 if chain_analyses:
-                                    suggested_chain = " → ".join(
-                                        a.suggested_topic or a.current_topic or "(missing)"
-                                        for a in chain_analyses
-                                    )
-                                    ui.label(f"Suggested: {suggested_chain}").classes(
-                                        "text-body2 text-positive q-mt-xs"
-                                    )
+                                    sug_map = {}
+                                    for a in chain_analyses:
+                                        sug_map[a.current_topic or "(missing)"] = (
+                                            a.suggested_topic or a.current_topic or "(missing)"
+                                        )
+                                    if tree_adj:
+                                        sug_adj = {}
+                                        for parent_t, child_ts in tree_adj.items():
+                                            sug_parent = sug_map.get(parent_t, parent_t)
+                                            sug_adj[sug_parent] = [sug_map.get(c, c) for c in child_ts]
+                                        all_sug_children = set()
+                                        for ch_list in sug_adj.values():
+                                            all_sug_children.update(ch_list)
+                                        sug_roots = [sug_map.get(r, r) for r in roots]
+                                        sug_roots = [r for r in sug_roots if r not in all_sug_children] or sug_roots[:1]
+                                        sug_tree_lines = []
+                                        for sug_root in sug_roots:
+                                            sug_tree_lines.extend(_build_tree_lines(sug_adj, sug_root))
+                                        sug_tree_str = "\n".join(sug_tree_lines)
+                                        ui.label("Suggested:").classes("text-body2 text-bold text-positive q-mt-xs")
+                                        ui.html(
+                                            f"<pre style='margin:0;font-size:0.85em;color:green'>{sug_tree_str}</pre>"
+                                        )
+                                    else:
+                                        suggested_chain = " → ".join(
+                                            a.suggested_topic or a.current_topic or "(missing)"
+                                            for a in chain_analyses
+                                        )
+                                        ui.label(f"Suggested: {suggested_chain}").classes(
+                                            "text-body2 text-positive q-mt-xs"
+                                        )
 
                                     rows = []
                                     for a in chain_analyses:

@@ -21,7 +21,7 @@ import asyncio
 import json
 import logging
 import re
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
@@ -88,6 +88,26 @@ class _NodeRecord:
     business_summary: str
     function_name: str = ""
     all_properties: dict = field(default_factory=dict)
+
+
+@dataclass
+class _FlowTree:
+    """Call tree for one execution flow — preserves parent-child structure."""
+    ordered: list[str]
+    adjacency: dict[str, list[str]]
+    parent_of: dict[str, str | None] = field(default_factory=dict)
+
+    def children(self, key: str) -> list[str]:
+        return self.adjacency.get(key, [])
+
+    def parent(self, key: str) -> str | None:
+        return self.parent_of.get(key)
+
+    def siblings(self, key: str) -> list[str]:
+        p = self.parent(key)
+        if p is None:
+            return []
+        return [c for c in self.children(p) if c != key]
 
 
 # ------------------------------------------------------------------
@@ -385,7 +405,7 @@ class TopicConvergenceAgent:
         rule_issues: list[TopicIssueType],
         duplicate_keys: list[str],
         nodes_by_key: dict[str, _NodeRecord],
-        chain_keys: list[str],
+        flow_tree: _FlowTree | None,
         sem: asyncio.Semaphore,
     ) -> tuple[float, str, str, str, float]:
         """Returns (alignment_score, alignment_explanation,
@@ -393,24 +413,33 @@ class TopicConvergenceAgent:
         if not node.topic and not node.business_summary:
             return (0.0, "Both topic and business_summary missing", "", "", 0.0)
 
-        prev_topic, next_topic = "", ""
-        if chain_keys:
-            try:
-                idx = chain_keys.index(node.node_key)
-                if idx > 0:
-                    pn = nodes_by_key.get(chain_keys[idx - 1])
-                    prev_topic = pn.topic if pn and pn.topic else ""
-                if idx < len(chain_keys) - 1:
-                    nn = nodes_by_key.get(chain_keys[idx + 1])
-                    next_topic = nn.topic if nn and nn.topic else ""
-            except ValueError:
-                pass
+        caller_topic = ""
+        children_topics: list[str] = []
+        sibling_topics: list[str] = []
+        if flow_tree and node.node_key in flow_tree.parent_of:
+            parent_key = flow_tree.parent(node.node_key)
+            if parent_key:
+                pn = nodes_by_key.get(parent_key)
+                caller_topic = pn.topic if pn and pn.topic else ""
+            for ck in flow_tree.children(node.node_key):
+                cn = nodes_by_key.get(ck)
+                if cn and cn.topic:
+                    children_topics.append(cn.topic)
+            for sk in flow_tree.siblings(node.node_key):
+                sn = nodes_by_key.get(sk)
+                if sn and sn.topic:
+                    sibling_topics.append(sn.topic)
 
         parent_topic = ""
+        parent_code = ""
         if node.parent_snippet_key:
             parent = nodes_by_key.get(node.parent_snippet_key)
-            if parent and parent.topic:
-                parent_topic = parent.topic
+            if parent:
+                if parent.topic:
+                    parent_topic = parent.topic
+                parent_code = _truncate_code(
+                    parent.all_properties.get("snippet") or ""
+                )
 
         dup_details = []
         for dk in duplicate_keys:
@@ -421,16 +450,36 @@ class TopicConvergenceAgent:
         has_issues = bool(rule_issues)
         needs_alignment = bool(node.topic and node.business_summary)
 
+        snippet_code = _truncate_code(
+            node.all_properties.get("snippet") or ""
+        )
+
+        # For InputEntity/InputInterface nodes, extract useful UI properties
+        ui_context = ""
+        if node.node_type in ("InputEntity", "InputInterface"):
+            ui_props = {}
+            for prop_key in ("Caption", "OnClick", "OnChange", "type",
+                             "Name", "ControlType", "Action"):
+                val = node.all_properties.get(prop_key)
+                if val:
+                    ui_props[prop_key] = val
+            if ui_props:
+                ui_context = "; ".join(f"{k}={v}" for k, v in ui_props.items())
+
         prompt_parts = [
             "You are a business process naming expert. Analyze this node and respond with JSON.\n",
             f"- Current topic: \"{node.topic or '(missing)'}\"",
             f"- Business summary: \"{node.business_summary}\"",
             f"- Node type: \"{node.node_type}\"",
             f"- Function name: \"{node.function_name}\"",
+            f"- Source code:\n```\n{snippet_code}\n```" if snippet_code else "",
             f"- Parent snippet topic: \"{parent_topic}\"",
+            f"- Parent snippet code:\n```\n{parent_code}\n```" if parent_code else "",
+            f"- UI element properties: {ui_context}" if ui_context else "",
             f"- Issues found: {[i.value for i in rule_issues]}",
-            f"- Previous step in chain: \"{prev_topic}\"",
-            f"- Next step in chain: \"{next_topic}\"",
+            f"- Called by (parent in call tree): \"{caller_topic}\"" if caller_topic else "",
+            f"- Calls (children in call tree): {children_topics}" if children_topics else "",
+            f"- Siblings (also called by same parent): {sibling_topics}" if sibling_topics else "",
             f"- Other nodes with same topic: {dup_details}" if dup_details else "",
         ]
 
@@ -438,9 +487,29 @@ class TopicConvergenceAgent:
             "\nTasks:\n"
             "1. Rate alignment between topic and business_summary (0.0-1.0).\n"
             "2. If there are issues OR alignment < 0.7, suggest a new topic name using "
-            "Active Verb + Business Object pattern (no technical glue words like Submit, "
-            "Data, Record, Update). For missing topics, generate from business_summary.\n"
-            "3. Ensure the suggestion is UNIQUE and fits in a customer journey sequence.\n\n"
+            "Active Verb + Concrete Object pattern.\n"
+            "3. STRICT GROUNDING RULES (follow these exactly):\n"
+            "   a) The source code is the SOLE ground truth. Only describe what the code "
+            "ACTUALLY does. Never invent functionality not present in the code.\n"
+            "   b) If code shows a specific action (e.g., showmessage → 'Display User "
+            "Message', querying a database → 'Query Employee Database'), the topic must "
+            "reflect that EXACT concrete behavior.\n"
+            "   c) If the code body is empty, a stub, or only has comments, derive the "
+            "topic from the function name and parameter types ONLY. Translate non-English "
+            "names literally (e.g., 'TraitementDeLaBase(Texte, Table)' → 'Process "
+            "Database Table with Text Input'). Do NOT fabricate behavior like 'Apply "
+            "Business Rules' when the code does nothing.\n"
+            "   d) For UI form definitions (.dfm), describe the UI layout and data "
+            "bindings literally (e.g., form with grid bound to EmployeesTable → "
+            "'Display Employee Data Grid Form', button with OnClick → 'Employee Form "
+            "with Action Buttons'). Do NOT invent 'Search' or 'Filter' if no search/"
+            "filter code exists.\n"
+            "   e) For event handlers that just delegate to another function, describe "
+            "the trigger (e.g., 'Invoke Database Processing on Click').\n"
+            "   f) Do NOT fabricate domain terms like 'Business Rules', 'Workflow "
+            "Orchestration', 'Online Management' unless those exact concepts appear in "
+            "the code.\n"
+            "4. Ensure the suggestion is UNIQUE among sibling nodes.\n\n"
             "Return JSON: {\"alignment_score\": <float>, \"alignment_explanation\": \"...\", "
             "\"suggested_topic\": \"...\", \"rationale\": \"...\", \"confidence\": <float>}\n"
             "If no suggestion needed, set suggested_topic to empty string."
@@ -454,7 +523,7 @@ class TopicConvergenceAgent:
                     model=settings.litellm_model,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=settings.llm_temperature,
-                    max_tokens=400,
+                    max_tokens=600,
                     **settings.get_litellm_kwargs(),
                 )
                 text = resp.choices[0].message.content.strip()
@@ -479,8 +548,8 @@ class TopicConvergenceAgent:
         project_id: int,
         run_id: int,
         nodes_by_key: dict[str, _NodeRecord],
-    ) -> dict[str, list[str]]:
-        """Returns {ef_key: [ordered snippet keys along CALLS chain]}."""
+    ) -> dict[str, _FlowTree]:
+        """Returns {ef_key: _FlowTree} with ordered nodes and adjacency."""
         cypher = """
         MATCH (ef:ExecutionFlow {project_id: $pid, run_id: $rid})<-[:PARTICIPATES_IN_FLOW]-(s:Snippet)
         OPTIONAL MATCH (s)-[c:CALLS]->(t:Snippet)
@@ -501,64 +570,151 @@ class TopicConvergenceAgent:
             if caller and callee:
                 ef_edges[ef_key].append((caller, callee, order))
 
-        chains: dict[str, list[str]] = {}
+        trees: dict[str, _FlowTree] = {}
         for ef_key, edges in ef_edges.items():
             edges.sort(key=lambda x: x[2])
+
+            all_callers = {c for c, _, _ in edges}
+            all_callees = {t for _, t, _ in edges}
+            roots = all_callers - all_callees
+            if not roots:
+                roots = {edges[0][0]} if edges else set()
+
+            adjacency: dict[str, list[str]] = defaultdict(list)
+            parent_of: dict[str, str | None] = {}
+            for caller, callee, _ in edges:
+                if callee not in adjacency[caller]:
+                    adjacency[caller].append(callee)
+                if callee not in parent_of:
+                    parent_of[callee] = caller
+            for r_key in roots:
+                parent_of.setdefault(r_key, None)
+
             ordered: list[str] = []
             seen: set[str] = set()
+
+            queue: deque[str] = deque()
+            for r_key in sorted(roots):
+                if r_key not in seen:
+                    queue.append(r_key)
+                    seen.add(r_key)
+
+            while queue:
+                node = queue.popleft()
+                ordered.append(node)
+                for child in adjacency.get(node, []):
+                    if child not in seen:
+                        seen.add(child)
+                        queue.append(child)
+
             for caller, callee, _ in edges:
-                if caller not in seen:
-                    ordered.append(caller)
-                    seen.add(caller)
-                if callee not in seen:
-                    ordered.append(callee)
-                    seen.add(callee)
-            chains[ef_key] = ordered
-        return chains
+                for k in (caller, callee):
+                    if k not in seen:
+                        ordered.append(k)
+                        seen.add(k)
+
+            trees[ef_key] = _FlowTree(
+                ordered=ordered,
+                adjacency=dict(adjacency),
+                parent_of=parent_of,
+            )
+        return trees
 
     # ==================================================================
     # STEP 6 — LLM: journey chain validation (PARALLEL across flows)
     # ==================================================================
 
+    @staticmethod
+    def _build_tree_text(
+        tree: _FlowTree,
+        nodes_by_key: dict[str, _NodeRecord],
+    ) -> str:
+        """Render call tree as indented text so the LLM sees parent-child structure."""
+        lines: list[str] = []
+        key_info: dict[str, dict] = {}
+        for key in tree.ordered:
+            n = nodes_by_key.get(key)
+            if n:
+                code_brief = _truncate_code(
+                    n.all_properties.get("snippet") or "", 200,
+                )
+                key_info[key] = {
+                    "key": key,
+                    "topic": n.topic or "(missing)",
+                    "business_summary": n.business_summary,
+                    "node_type": n.node_type,
+                    "code": code_brief,
+                }
+
+        visited: set[str] = set()
+
+        def _walk(key: str, depth: int) -> None:
+            if key in visited or key not in key_info:
+                return
+            visited.add(key)
+            info = key_info[key]
+            indent = "    " * depth
+            prefix = "├── " if depth > 0 else "[ROOT] "
+            lines.append(
+                f"{indent}{prefix}[{info['node_type']}] "
+                f"topic=\"{info['topic']}\" key={info['key']}"
+            )
+            if info["code"]:
+                lines.append(f"{indent}      code: {info['code']}")
+            lines.append(
+                f"{indent}      business_summary: \"{info['business_summary']}\""
+            )
+            for child in tree.children(key):
+                _walk(child, depth + 1)
+
+        roots = [k for k in tree.ordered if tree.parent(k) is None]
+        for r in roots:
+            _walk(r, 0)
+        for k in tree.ordered:
+            if k not in visited:
+                _walk(k, 0)
+        return "\n".join(lines)
+
     async def _validate_journey_chains_parallel(
         self,
-        chains: dict[str, list[str]],
+        chains: dict[str, _FlowTree],
         nodes_by_key: dict[str, _NodeRecord],
         sem: asyncio.Semaphore,
     ) -> dict[str, str]:
         """Validate all chains in parallel. Returns {node_key: suggested_topic}."""
         all_suggestions: dict[str, str] = {}
 
-        async def _validate_one(ef_key: str, chain_keys: list[str]) -> None:
-            if len(chain_keys) < 2:
+        async def _validate_one(ef_key: str, flow: _FlowTree) -> None:
+            if len(flow.ordered) < 2:
                 return
-            steps = []
-            for key in chain_keys:
-                n = nodes_by_key.get(key)
-                if n:
-                    steps.append({
-                        "key": key,
-                        "topic": n.topic or "(missing)",
-                        "business_summary": n.business_summary,
-                        "node_type": n.node_type,
-                    })
-            if not steps:
+            tree_text = self._build_tree_text(flow, nodes_by_key)
+            if not tree_text:
                 return
 
-            chain_text = " --> ".join(s["topic"] for s in steps)
             prompt = (
-                "These are the steps in a business execution flow (customer journey). "
-                "Each step is a Snippet node with a topic.\n\n"
-                f"Current chain: {chain_text}\n\n"
-                "Step details:\n"
-                + "\n".join(
-                    f"  {i+1}. [{s['node_type']}] topic=\"{s['topic']}\" "
-                    f"business_summary=\"{s['business_summary']}\""
-                    for i, s in enumerate(steps)
-                )
-                + "\n\nDo these topics, when read in sequence, describe a coherent "
-                "customer journey? Suggest reworded topics so the chain reads "
-                "naturally using Active Verb + Business Object naming.\n"
+                "You are analyzing an execution flow call tree. The structure below "
+                "shows ACTUAL parent-child call relationships (a parent CALLS its "
+                "children; siblings are called by the SAME parent, NOT sequentially).\n\n"
+                f"Call tree:\n{tree_text}\n\n"
+                "STRICT GROUNDING RULES:\n"
+                "1. The source code is the SOLE ground truth. Only describe what the "
+                "code ACTUALLY does — never invent functionality, business logic, or "
+                "domain meaning that is not directly evident in the code.\n"
+                "2. If code is a UI form definition (e.g., .dfm), describe what UI "
+                "elements it contains and what data it displays (e.g., 'Display "
+                "Employee Records Grid' not 'Search Employee Records').\n"
+                "3. If code is an event handler that calls another function, describe "
+                "the trigger action literally (e.g., 'Trigger Database Processing on "
+                "Button Click').\n"
+                "4. If code body is empty, a stub, or only has comments, base the "
+                "topic on the function name and signature only. Translate non-English "
+                "function names literally (e.g., 'TraitementDeLaBase' → 'Process "
+                "Database Records'). Do NOT fabricate behavior.\n"
+                "5. Use the pattern: Active Verb + Concrete Object (derived from code).\n"
+                "6. Do NOT create a polished narrative by inventing connecting logic. "
+                "Each node's topic must stand on its own code evidence.\n"
+                "7. Siblings (children of the same parent) are called by that parent — "
+                "they do NOT call each other unless the tree explicitly shows it.\n\n"
                 "Return JSON: {\"suggestions\": [{\"key\": \"...\", \"suggested_topic\": \"...\"}]}"
             )
             async with sem:
@@ -579,10 +735,10 @@ class TopicConvergenceAgent:
                 except Exception as exc:
                     logger.warning("Journey chain validation failed for %s: %s", ef_key, exc)
 
-        items = [(ek, ck) for ek, ck in chains.items() if len(ck) >= 2]
+        items = [(ek, ft) for ek, ft in chains.items() if len(ft.ordered) >= 2]
         for i in range(0, len(items), LLM_BATCH_SIZE):
             batch = items[i:i + LLM_BATCH_SIZE]
-            await asyncio.gather(*[_validate_one(ek, ck) for ek, ck in batch])
+            await asyncio.gather(*[_validate_one(ek, ft) for ek, ft in batch])
             if i + LLM_BATCH_SIZE < len(items):
                 await asyncio.sleep(LLM_BATCH_DELAY)
         return all_suggestions
@@ -682,9 +838,9 @@ class TopicConvergenceAgent:
             n = nodes_by_key[nkey]
             issues = key_issues.get(nkey, [])
             dup_keys = dup_groups.get(key_to_group.get(nkey, ""), [])
-            chain = chains.get(n.ef_key, [])
+            flow_tree = chains.get(n.ef_key)
             result = await self._check_and_remediate(
-                n, issues, dup_keys, nodes_by_key, chain, sem,
+                n, issues, dup_keys, nodes_by_key, flow_tree, sem,
             )
             llm_results[nkey] = result
 
@@ -735,21 +891,30 @@ class TopicConvergenceAgent:
                 rationale = "Suggested by journey chain analysis"
                 confidence = 0.6
 
-            chain_keys = chains.get(n.ef_key, [])
+            flow_tree = chains.get(n.ef_key)
             chain_pos = None
             chain_ctx = ""
-            if n.node_key in chain_keys:
-                idx = chain_keys.index(n.node_key)
-                chain_pos = idx
-                prev_t = ""
-                next_t = ""
-                if idx > 0:
-                    pn = nodes_by_key.get(chain_keys[idx - 1])
-                    prev_t = pn.topic if pn and pn.topic else "?"
-                if idx < len(chain_keys) - 1:
-                    nn = nodes_by_key.get(chain_keys[idx + 1])
-                    next_t = nn.topic if nn and nn.topic else "?"
-                chain_ctx = f"{prev_t} --> [{n.topic or '(missing)'}] --> {next_t}"
+            if flow_tree and n.node_key in flow_tree.parent_of:
+                chain_pos = flow_tree.ordered.index(n.node_key) if n.node_key in flow_tree.ordered else None
+                parent_key = flow_tree.parent(n.node_key)
+                child_keys = flow_tree.children(n.node_key)
+                parent_t = ""
+                if parent_key:
+                    pn = nodes_by_key.get(parent_key)
+                    parent_t = pn.topic if pn and pn.topic else "?"
+                child_ts = []
+                for ck in child_keys:
+                    cn = nodes_by_key.get(ck)
+                    child_ts.append(cn.topic if cn and cn.topic else "?")
+                current_t = n.topic or "(missing)"
+                if parent_t and child_ts:
+                    chain_ctx = f"{parent_t} -> [{current_t}] -> {{{', '.join(child_ts)}}}"
+                elif parent_t:
+                    chain_ctx = f"{parent_t} -> [{current_t}]"
+                elif child_ts:
+                    chain_ctx = f"[{current_t}] -> {{{', '.join(child_ts)}}}"
+                else:
+                    chain_ctx = f"[{current_t}]"
 
             issue_details_parts = []
             if TopicIssueType.TOPIC_MISSING in issues:
@@ -799,12 +964,25 @@ class TopicConvergenceAgent:
                 nodes_missing += 1
 
         journey_chain_topics: dict[str, list[str]] = {}
-        for ef_key, keys in chains.items():
+        for ef_key, flow_tree in chains.items():
             topics = []
-            for k in keys:
+            for k in flow_tree.ordered:
                 n = nodes_by_key.get(k)
                 topics.append(n.topic if n and n.topic else "(missing)")
             journey_chain_topics[ef_key] = topics
+
+        journey_chain_trees: dict[str, dict[str, list[str]]] = {}
+        for ef_key, flow_tree in chains.items():
+            adj_topics: dict[str, list[str]] = {}
+            for parent_key, child_keys in flow_tree.adjacency.items():
+                pn = nodes_by_key.get(parent_key)
+                parent_topic = pn.topic if pn and pn.topic else "(missing)"
+                child_topic_list = []
+                for ck in child_keys:
+                    cn = nodes_by_key.get(ck)
+                    child_topic_list.append(cn.topic if cn and cn.topic else "(missing)")
+                adj_topics[parent_topic] = child_topic_list
+            journey_chain_trees[ef_key] = adj_topics
 
         report = TopicAnalysisReport(
             project_id=project_id,
@@ -817,6 +995,7 @@ class TopicConvergenceAgent:
             analyses=analyses,
             duplicate_groups=dup_groups,
             journey_chains=journey_chain_topics,
+            journey_chain_trees=journey_chain_trees,
         )
         logger.info(
             "[analyze] DONE: %d nodes, %d with issues, %d missing topic",
@@ -829,6 +1008,19 @@ class TopicConvergenceAgent:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+_CODE_TRUNCATE_LEN = 500
+
+
+def _truncate_code(code: str, max_len: int = _CODE_TRUNCATE_LEN) -> str:
+    """Truncate source code to a reasonable length for LLM context."""
+    if not code:
+        return ""
+    code = code.strip()
+    if len(code) <= max_len:
+        return code
+    return code[:max_len] + "\n... (truncated)"
+
 
 def _pick_label(labels: list[str], default: str) -> str:
     """Pick the most specific label from a Neo4j labels list."""
