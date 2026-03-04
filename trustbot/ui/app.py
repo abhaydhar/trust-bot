@@ -2890,18 +2890,27 @@ def create_ui():
                     if issue_filter != "All":
                         analyses = [a for a in analyses if issue_filter in [i.value for i in a.issues]]
 
+                    from difflib import SequenceMatcher as _SM
+
                     rows = []
                     for a in analyses:
                         issues_str = ", ".join(i.value for i in a.issues) if a.issues else "clean"
+                        cur = a.current_topic or "(missing)"
+                        sug = a.suggested_topic or ""
+                        sim = (
+                            round(_SM(None, cur.lower(), sug.lower()).ratio(), 2)
+                            if cur and sug else None
+                        )
                         rows.append({
                             "key": a.node_key,
                             "node_type": a.node_type,
                             "parent": a.parent_snippet_key or "-",
                             "ef": a.execution_flow_name or a.execution_flow_key,
-                            "topic": a.current_topic or "(missing)",
+                            "topic": cur,
                             "business_summary": (a.business_summary[:80] + "...") if len(a.business_summary) > 80 else a.business_summary,
                             "issues": issues_str,
-                            "suggestion": a.suggested_topic,
+                            "suggestion": sug,
+                            "similarity": sim,
                             "confidence": f"{a.confidence:.0%}" if a.confidence else "-",
                         })
 
@@ -2919,6 +2928,7 @@ def create_ui():
                             {"name": "business_summary", "label": "Business Summary", "field": "business_summary"},
                             {"name": "issues", "label": "Issues", "field": "issues", "sortable": True},
                             {"name": "suggestion", "label": "Suggested Topic", "field": "suggestion"},
+                            {"name": "similarity", "label": "Similarity", "field": "similarity", "sortable": True},
                             {"name": "confidence", "label": "Conf.", "field": "confidence", "sortable": True},
                         ]
 
@@ -3092,14 +3102,23 @@ def create_ui():
                                             "text-body2 text-positive q-mt-xs"
                                         )
 
+                                    from difflib import SequenceMatcher as _SM
+
                                     rows = []
                                     for a in chain_analyses:
+                                        cur = a.current_topic or "(missing)"
+                                        sug = a.suggested_topic or ""
+                                        sim = (
+                                            round(_SM(None, cur.lower(), sug.lower()).ratio(), 2)
+                                            if cur and sug else None
+                                        )
                                         rows.append({
                                             "pos": a.chain_position,
                                             "key": a.node_key,
                                             "type": a.node_type,
-                                            "current": a.current_topic or "(missing)",
-                                            "suggested": a.suggested_topic,
+                                            "current": cur,
+                                            "suggested": sug,
+                                            "similarity": sim,
                                         })
                                     ui.table(
                                         columns=[
@@ -3108,6 +3127,7 @@ def create_ui():
                                             {"name": "type", "label": "Type", "field": "type"},
                                             {"name": "current", "label": "Current Topic", "field": "current"},
                                             {"name": "suggested", "label": "Suggested Topic", "field": "suggested"},
+                                            {"name": "similarity", "label": "Similarity", "field": "similarity", "sortable": True},
                                         ],
                                         rows=rows,
                                         row_key="key",

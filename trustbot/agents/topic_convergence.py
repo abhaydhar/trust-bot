@@ -549,11 +549,18 @@ class TopicConvergenceAgent:
         run_id: int,
         nodes_by_key: dict[str, _NodeRecord],
     ) -> dict[str, _FlowTree]:
-        """Returns {ef_key: _FlowTree} with ordered nodes and adjacency."""
+        """Returns {ef_key: _FlowTree} with ordered nodes and adjacency.
+
+        Each tree has the ExecutionFlow node as its root, with the snippet
+        call tree hanging beneath it.
+        """
         cypher = """
         MATCH (ef:ExecutionFlow {project_id: $pid, run_id: $rid})<-[:PARTICIPATES_IN_FLOW]-(s:Snippet)
         OPTIONAL MATCH (s)-[c:CALLS]->(t:Snippet)
         RETURN ef.key AS ef_key,
+               ef.name AS ef_name,
+               ef.topic AS ef_topic,
+               ef.description AS ef_description,
                s.key AS caller_key,
                t.key AS callee_key,
                c.global_execution_order AS exec_order
@@ -562,6 +569,7 @@ class TopicConvergenceAgent:
         rows = await self._neo4j.query(cypher, {"pid": project_id, "rid": run_id})
 
         ef_edges: dict[str, list[tuple[str, str, int]]] = defaultdict(list)
+        ef_meta: dict[str, dict[str, str]] = {}
         for r in rows:
             ef_key = r.get("ef_key") or ""
             caller = r.get("caller_key") or ""
@@ -569,6 +577,12 @@ class TopicConvergenceAgent:
             order = r.get("exec_order") or 0
             if caller and callee:
                 ef_edges[ef_key].append((caller, callee, order))
+            if ef_key and ef_key not in ef_meta:
+                ef_meta[ef_key] = {
+                    "name": r.get("ef_name") or "",
+                    "topic": r.get("ef_topic") or "",
+                    "description": r.get("ef_description") or "",
+                }
 
         trees: dict[str, _FlowTree] = {}
         for ef_key, edges in ef_edges.items():
@@ -576,25 +590,47 @@ class TopicConvergenceAgent:
 
             all_callers = {c for c, _, _ in edges}
             all_callees = {t for _, t, _ in edges}
-            roots = all_callers - all_callees
-            if not roots:
-                roots = {edges[0][0]} if edges else set()
+            snippet_roots = all_callers - all_callees
+            if not snippet_roots:
+                snippet_roots = {edges[0][0]} if edges else set()
 
             adjacency: dict[str, list[str]] = defaultdict(list)
             parent_of: dict[str, str | None] = {}
+
             for caller, callee, _ in edges:
                 if callee not in adjacency[caller]:
                     adjacency[caller].append(callee)
                 if callee not in parent_of:
                     parent_of[callee] = caller
-            for r_key in roots:
-                parent_of.setdefault(r_key, None)
 
-            ordered: list[str] = []
-            seen: set[str] = set()
+            adjacency[ef_key] = list(snippet_roots)
+            for sr in snippet_roots:
+                parent_of[sr] = ef_key
+            parent_of[ef_key] = None
+
+            meta = ef_meta.get(ef_key, {})
+            if ef_key not in nodes_by_key:
+                nodes_by_key[ef_key] = _NodeRecord(
+                    node_key=ef_key,
+                    node_name=meta.get("name", ""),
+                    node_type="ExecutionFlow",
+                    parent_snippet_key=None,
+                    ef_key=ef_key,
+                    ef_name=meta.get("name", ""),
+                    topic=meta.get("topic") or None,
+                    business_summary=meta.get("description", ""),
+                    function_name="",
+                    all_properties={
+                        "name": meta.get("name", ""),
+                        "description": meta.get("description", ""),
+                    },
+                )
+
+            ordered: list[str] = [ef_key]
+            seen: set[str] = {ef_key}
 
             queue: deque[str] = deque()
-            for r_key in sorted(roots):
+            for r_key in sorted(snippet_roots):
                 if r_key not in seen:
                     queue.append(r_key)
                     seen.add(r_key)
@@ -695,6 +731,9 @@ class TopicConvergenceAgent:
                 "You are analyzing an execution flow call tree. The structure below "
                 "shows ACTUAL parent-child call relationships (a parent CALLS its "
                 "children; siblings are called by the SAME parent, NOT sequentially).\n\n"
+                "The [ROOT] node with type [ExecutionFlow] represents the overall "
+                "flow/journey. Its topic should summarize the ENTIRE flow based on "
+                "what ALL the code in the tree actually does — not a generic label.\n\n"
                 f"Call tree:\n{tree_text}\n\n"
                 "STRICT GROUNDING RULES:\n"
                 "1. The source code is the SOLE ground truth. Only describe what the "
@@ -712,9 +751,23 @@ class TopicConvergenceAgent:
                 "Database Records'). Do NOT fabricate behavior.\n"
                 "5. Use the pattern: Active Verb + Concrete Object (derived from code).\n"
                 "6. Do NOT create a polished narrative by inventing connecting logic. "
-                "Each node's topic must stand on its own code evidence.\n"
+                "Each Snippet node's topic must stand on its own code evidence.\n"
                 "7. Siblings (children of the same parent) are called by that parent — "
-                "they do NOT call each other unless the tree explicitly shows it.\n\n"
+                "they do NOT call each other unless the tree explicitly shows it.\n"
+                "8. For the [ExecutionFlow] root node: its topic MUST summarize the "
+                "END-TO-END flow by incorporating concrete behaviors from EVERY level "
+                "of the tree — not just the first child. Walk the full tree: what does "
+                "the entry point do? What downstream functions does it trigger? What is "
+                "the final effect?\n"
+                "   CORRECT example: tree is Form(grid+buttons) → ButtonClick → "
+                "DBProcess → the EF topic is 'Display Employee Grid and Process "
+                "Database via Button Click'.\n"
+                "   INCORRECT example: 'Display Employee Data Grid Form' — this only "
+                "describes the first child and ignores the downstream database processing.\n"
+                "   The EF topic should read as a one-sentence summary of the entire "
+                "call chain from entry to leaf.\n\n"
+                "IMPORTANT: You MUST include a suggestion for EVERY node in the tree, "
+                "including the [ExecutionFlow] root node.\n\n"
                 "Return JSON: {\"suggestions\": [{\"key\": \"...\", \"suggested_topic\": \"...\"}]}"
             )
             async with sem:
@@ -809,6 +862,17 @@ class TopicConvergenceAgent:
         logger.info("[analyze] Building journey chains...")
         chains = await self._build_journey_chains(project_id, run_id, nodes_by_key)
         logger.info("[analyze] Built %d journey chains, validating...", len(chains))
+
+        ef_node_keys_added: set[str] = set()
+        for ef_key in chains:
+            ef_node = nodes_by_key.get(ef_key)
+            if ef_node and ef_node.node_key not in {n.node_key for n in all_nodes}:
+                all_nodes.append(ef_node)
+                ef_node_keys_added.add(ef_key)
+                type_breakdown[ef_node.node_type] += 1
+                if not ef_node.topic:
+                    key_issues[ef_key].append(TopicIssueType.TOPIC_MISSING)
+
         journey_suggestions = await self._validate_journey_chains_parallel(chains, nodes_by_key, sem)
         logger.info("[analyze] Journey validation done, %d suggestions", len(journey_suggestions))
 
