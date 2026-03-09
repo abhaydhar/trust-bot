@@ -17,7 +17,7 @@ from typing import Any
 
 import litellm
 
-from trustbot.agent.prompts import VALIDATION_PROMPT
+from trustbot.prompts import get_prompt
 from trustbot.config import settings
 from trustbot.models.graph import CallEdge, CallGraph, Snippet
 from trustbot.models.validation import (
@@ -337,7 +337,8 @@ class ValidationEngine:
         edge: CallEdge,
     ) -> EdgeStatus:
         """Ask the LLM whether the caller actually calls the callee."""
-        prompt = VALIDATION_PROMPT.format(
+        prompt = get_prompt(
+            "agent.validation_prompt",
             caller_function=caller.function_name,
             caller_file=caller.file_path,
             caller_start=caller.line_start or "?",

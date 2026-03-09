@@ -1,0 +1,32 @@
+id: codegen_frontend
+description: Convert legacy code to React TypeScript component
+template_variables:
+  - name
+  - comp_type
+  - props_str
+  - state_management
+  - css_framework
+  - source_content
+content: |
+  Convert the following legacy code into a modern React TypeScript component.
+
+  Component name: {name}
+  Component type: {comp_type}
+  Props: {props_str}
+  State management: {state_management}
+  CSS framework: {css_framework}
+
+  Legacy source code:
+  ```
+  {source_content}
+  ```
+
+  Requirements:
+  - Use TypeScript with proper type definitions
+  - Use functional components with hooks
+  - Implement proper error handling
+  - Add appropriate props interface
+  - Use {css_framework} for styling
+  - Make API calls to the backend service layer
+
+  Output ONLY the TypeScript/TSX code, no explanations.

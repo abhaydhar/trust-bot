@@ -55,137 +55,7 @@ MAX_SAMPLE_FILES = 8
 MAX_SAMPLE_LINES = 500
 MAX_REFINEMENT_CYCLES = 3
 
-# ---------------------------------------------------------------------------
-# LLM prompt for profile generation
-# ---------------------------------------------------------------------------
-
-PROFILE_GENERATION_PROMPT = """\
-You are an expert programming-language analyst.  Given sample source files
-from a codebase, produce a **complete language profile** as a single JSON
-object that precisely describes how to parse, chunk, and analyse call graphs
-for this language.
-
-REQUIREMENTS — be exhaustive; missing patterns will cause downstream failures:
-
-1. **function_def_patterns** — regex strings (Python `re` syntax, MULTILINE)
-   that match EVERY form of function/procedure/method/subroutine definition
-   in this language.  Each pattern MUST contain a named group ``(?P<name>...)``
-   capturing the function name.  Optionally include ``(?P<indent>...)`` for
-   indentation and ``(?P<class_prefix>\\w+)`` for class-qualified names
-   (e.g. ``TClassName.MethodName`` in Delphi).
-   Cover ALL variants: async, static, virtual, override, abstract, class
-   methods, constructors, destructors, anonymous/inline, etc.
-
-   CRITICAL tips for robust patterns:
-   - **Line-numbered sources**: some languages (Natural, COBOL, RPG) prefix
-     every source line with a sequence number (e.g. ``0950 DEFINE ...``).
-     If the sample files show this, add an optional prefix ``^(?:\\d+\\s+)?``
-     so the pattern matches with and without line numbers.
-   - **Local subroutines / inner functions**: include patterns for locally
-     scoped callable definitions (Natural ``DEFINE SUBROUTINE Name``, RPG
-     ``BEGSR Name``, Python nested ``def``, etc.) — these MUST be chunked
-     as separate functions so that calls to them are tracked.
-   - **Hyphenated identifiers**: if the language allows hyphens in names
-     (Natural, COBOL), use ``(?P<name>\\w[\\w\\-]*)`` instead of
-     ``(?P<name>\\w+)``.
-
-2. **class_def_patterns** — regex strings that match class/interface/struct
-   definitions with a ``(?P<name>\\w+)`` group.
-
-3. **named_regex_groups** — a mapping of semantic role to group name used in
-   the patterns above.  At minimum ``{"name": "name"}``.  Add
-   ``"class_prefix": "<group>"`` if function patterns capture a qualifying
-   class name.
-
-4. **forward_declaration_rules** — if the language separates declarations from
-   implementations (e.g. Delphi ``interface`` / ``implementation``), provide:
-   ``{"keyword": "<boundary>", "strategy": "discard_before_keyword_unless_class_prefix"}``.
-   Otherwise ``null``.
-
-5. **special_file_types** — list of non-source file types that contain event
-   bindings or declarative links (e.g. Delphi ``.dfm``, .NET ``.xaml``).
-   Each entry: ``{"extension": ".dfm", "parser_type": "dfm_form",
-   "object_pattern": "<regex>", "event_pattern": "<regex>",
-   "metadata_keys": ["event_handlers"]}``.
-
-6. **block_rules** — open/close block-boundary rules for scope-aware
-   structural chunking.  Each rule: ``{"block_type": "procedure",
-   "open_pattern": "<regex>", "close_pattern": "<regex>",
-   "name_group": "name"}``.  Leave empty ``[]`` if the language does not
-   benefit from structural chunking.
-
-7. **llm_call_prompt** — a detailed, language-specific prompt addendum
-   (plain text, will be appended to a base prompt) that tells an LLM:
-   - Which syntactic patterns ARE function/procedure calls in this language
-     (with concrete examples from the provided code samples).
-   - Which patterns are NOT calls (variable declarations, imports, type
-     references, class inheritance, etc. — with concrete examples).
-   This must be exhaustive for the language.
-
-8. **skip_tokens** — list of language KEYWORDS that should never be treated
-   as function calls (e.g. ``["BEGIN", "END", "IF", "ELSE", ...]``).
-
-9. **supports_bare_identifiers** — ``true`` if this language allows calling
-   functions/procedures without parentheses (e.g. Delphi, Ruby).
-   ``false`` for languages where calls always use ``()``.
-
-10. **bare_id_negative_lookahead** — if ``supports_bare_identifiers`` is true,
-    provide a regex lookahead to reject false matches (e.g.
-    ``"(?!\\\\s*\\\\.)"`` to reject property access in Delphi).
-    Otherwise ``""``.
-
-11. **single_line_comment**, **multi_line_comment_open**,
-    **multi_line_comment_close**, **string_delimiters** — comment and string
-    syntax for the language.
-
-12. **call_keyword_patterns** — regex strings for language-specific call
-    invocation syntax that does NOT use parentheses.  Each pattern MUST
-    contain a named group ``(?P<callee>...)``.  Examples:
-    - Natural: ``FETCH 'ProgramName'`` → ``"(?:FETCH|FETCH\\s+RETURN)\\s+'(?P<callee>\\w+)'"``
-    - Natural: ``PERFORM SubName`` → ``"PERFORM\\s+(?P<callee>\\w[\\w\\-]*)"``
-    - COBOL: ``PERFORM paragraph`` → ``"PERFORM\\s+(?P<callee>[A-Z0-9\\-]+)"``
-    - RPG: ``EXSR subroutine`` → ``"EXSR\\s+(?P<callee>\\w+)"``
-    Leave empty ``[]`` for languages where all calls use ``()``.
-
-Return ONLY the JSON object — no markdown fences, no commentary.
-
-JSON SCHEMA:
-{
-  "language": "<string>",
-  "aliases": ["<string>", ...],
-  "file_extensions": [".ext", ...],
-  "function_def_patterns": ["<regex>", ...],
-  "class_def_patterns": ["<regex>", ...],
-  "named_regex_groups": {"name": "name", ...},
-  "forward_declaration_rules": {"keyword": "", "strategy": ""} | null,
-  "special_file_types": [{"extension": "", "parser_type": "", "object_pattern": "", "event_pattern": "", "metadata_keys": []}],
-  "block_rules": [{"block_type": "", "open_pattern": "", "close_pattern": "", "name_group": "name"}],
-  "llm_call_prompt": "<string>",
-  "skip_tokens": ["<string>", ...],
-  "supports_bare_identifiers": false,
-  "bare_id_negative_lookahead": "",
-  "call_keyword_patterns": ["<regex with (?P<callee>...)>", ...],
-  "call_pattern_examples": ["<example from code>", ...],
-  "non_call_examples": ["<example from code>", ...],
-  "single_line_comment": "//",
-  "multi_line_comment_open": "/*",
-  "multi_line_comment_close": "*/",
-  "string_delimiters": ["\\""]
-}
-"""
-
-REFINEMENT_PROMPT = """\
-Your previously generated regex patterns MISSED some function definitions in
-the target codebase.  Below are the lines that contain real function/procedure
-definitions but were NOT matched by your patterns.
-
-MISSED LINES (file → line):
-{missed_lines}
-
-Analyse these missed lines, update your function_def_patterns and
-class_def_patterns to cover them.  Return the FULL updated JSON profile
-(same schema as before) — not just the changed fields.
-"""
+from trustbot.prompts import get_prompt
 
 
 def _create_llm():
@@ -492,7 +362,7 @@ class Agent0LanguageProfiler:
             from langchain_core.messages import HumanMessage, SystemMessage
 
             resp = await llm.ainvoke([
-                SystemMessage(content=PROFILE_GENERATION_PROMPT),
+                SystemMessage(content=get_prompt("agent0.profile_generation")),
                 HumanMessage(content=user_msg),
             ])
             raw = resp.content if hasattr(resp, "content") else str(resp)
@@ -690,7 +560,7 @@ class Agent0LanguageProfiler:
         """Send missed lines back to LLM for pattern refinement."""
         missed_text = "\n".join(missed_lines)
 
-        user_msg = REFINEMENT_PROMPT.format(missed_lines=missed_text)
+        user_msg = get_prompt("agent0.refinement", missed_lines=missed_text)
         user_msg += "\n\nCURRENT PROFILE:\n" + profile.model_dump_json(indent=2)
 
         try:
@@ -698,7 +568,7 @@ class Agent0LanguageProfiler:
             from langchain_core.messages import HumanMessage, SystemMessage
 
             resp = await llm.ainvoke([
-                SystemMessage(content=PROFILE_GENERATION_PROMPT),
+                SystemMessage(content=get_prompt("agent0.profile_generation")),
                 HumanMessage(content=user_msg),
             ])
             raw = resp.content if hasattr(resp, "content") else str(resp)

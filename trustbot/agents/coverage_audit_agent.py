@@ -12,7 +12,9 @@ No LLM is needed — this is a pure set-comparison agent.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
+import yaml
 from pydantic import BaseModel, Field
 
 from trustbot.models.agentic import normalize_file_path
@@ -309,6 +311,71 @@ class CoverageAuditAgent:
             sample_key = next(iter(neo4j_set))
             logger.info("Sample neo4j edge key: %s", sample_key)
         return neo4j_set, len(rows), snippet_count
+
+    async def dump_neo4j_yaml(
+        self, project_id: int, run_id: int, output_path: Path | str | None = None,
+    ) -> str:
+        """
+        Fetch ALL Snippet nodes and CALLS edges from Neo4j for a given
+        project/run and dump the raw data as a YAML report.
+        Returns the YAML string (also writes to output_path if provided).
+        """
+        snippets_cypher = """
+        MATCH (s:Snippet {project_id: $pid, run_id: $rid})
+        RETURN properties(s) AS props
+        ORDER BY s.file_name, s.function_name
+        """
+        snippet_rows = await self._neo4j.query(
+            snippets_cypher, {"pid": project_id, "rid": run_id},
+        )
+
+        calls_cypher = """
+        MATCH (caller:Snippet {project_id: $pid, run_id: $rid})
+              -[c:CALLS]->(callee:Snippet)
+        RETURN properties(caller) AS caller_props,
+               properties(c)      AS edge_props,
+               properties(callee) AS callee_props
+        ORDER BY caller.file_name, caller.function_name
+        """
+        edge_rows = await self._neo4j.query(
+            calls_cypher, {"pid": project_id, "rid": run_id},
+        )
+
+        def _clean(d):
+            """Convert Neo4j values to YAML-safe types."""
+            if d is None:
+                return {}
+            return {k: v for k, v in dict(d).items() if v is not None}
+
+        report = {
+            "project_id": project_id,
+            "run_id": run_id,
+            "snippets": {
+                "count": len(snippet_rows),
+                "items": [_clean(r.get("props")) for r in snippet_rows],
+            },
+            "calls_edges": {
+                "count": len(edge_rows),
+                "items": [
+                    {
+                        "caller": _clean(r.get("caller_props")),
+                        "edge": _clean(r.get("edge_props")),
+                        "callee": _clean(r.get("callee_props")),
+                    }
+                    for r in edge_rows
+                ],
+            },
+        }
+
+        yaml_str = yaml.dump(report, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+        if output_path:
+            p = Path(output_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(yaml_str, encoding="utf-8")
+            logger.info("Neo4j YAML report written to %s", p)
+
+        return yaml_str
 
     def _load_function_info(self) -> dict[tuple[str, str], str]:
         """Load (FUNC_NAME, NORM_FILE) → class_name map from code_index."""

@@ -1,0 +1,33 @@
+id: validation_prompt
+description: Validates a single call graph edge
+template_variables:
+  - caller_function
+  - caller_file
+  - caller_start
+  - caller_end
+  - callee_function
+  - callee_file
+  - caller_code
+content: |
+  I need you to validate this call graph edge.
+
+  **Caller function:** `{caller_function}` in `{caller_file}` (lines {caller_start}-{caller_end})
+  **Expected callee:** `{callee_function}` in `{callee_file}`
+
+  Here is the caller function's code:
+
+  ```
+  {caller_code}
+  ```
+
+  Does this function call `{callee_function}`? Look for:
+  - Direct function calls: `{callee_function}(...)`
+  - Method calls: `something.{callee_function}(...)`
+  - References or imports that resolve to `{callee_function}`
+
+  Respond with a JSON object:
+  {{
+    "verdict": "CONFIRMED" | "UNCONFIRMED" | "CONTRADICTED",
+    "confidence": 0.0-1.0,
+    "details": "brief explanation"
+  }}

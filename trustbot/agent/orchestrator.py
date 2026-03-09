@@ -13,7 +13,7 @@ from typing import Any
 
 import litellm
 
-from trustbot.agent.prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
+from trustbot.prompts import get_prompt
 from trustbot.config import settings
 from trustbot.models.graph import CallGraph, ProjectCallGraph
 from trustbot.models.validation import ProjectValidationReport, ValidationReport
@@ -267,7 +267,7 @@ class AgentOrchestrator:
         questions about execution flows, code, etc.
         """
         if not self._messages:
-            self._messages.append({"role": "system", "content": SYSTEM_PROMPT})
+            self._messages.append({"role": "system", "content": get_prompt("agent.system_prompt")})
 
         self._messages.append({"role": "user", "content": user_message})
 
@@ -343,7 +343,8 @@ class AgentOrchestrator:
                 f"(confidence: {e.confidence:.0%}) — {e.details}"
             )
 
-        prompt = SUMMARY_PROMPT.format(
+        prompt = get_prompt(
+            "agent.summary_prompt",
             flow_key=call_graph.execution_flow.key,
             flow_name=call_graph.execution_flow.name,
             node_results="\n".join(node_lines) or "  (none)",

@@ -1,0 +1,21 @@
+id: build_fix
+description: Suggest fixes for build/compilation errors
+template_variables:
+  - target
+  - truncated_errors
+content: |
+  The following {target} build errors occurred:
+
+  ```
+  {truncated_errors}
+  ```
+
+  For each error, provide a fix in this format:
+  FILE: <relative_path>
+  FIX: <description>
+  CODE:
+  ```
+  <full corrected file content>
+  ```
+
+  Only fix actual compilation errors. Output nothing else.

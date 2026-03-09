@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.index.code_index import CodeIndex
 from trustbot.models.modernization import (
     ModernizationConfig,
@@ -254,15 +255,10 @@ class ParityAgent:
             items_text = "\n".join(
                 f"- {item['function']} ({item['file']})" for item in batch
             )
-            prompt = (
-                "The following legacy functions were NOT found by name in the new codebase.\n"
-                "Check if they may have been renamed, refactored, or merged.\n\n"
-                f"Legacy functions:\n{items_text}\n\n"
-                f"New codebase files:\n{new_files_text}\n\n"
-                "For each legacy function, respond:\n"
-                "LEGACY: <function> | STATUS: <migrated/partial/missing> | "
-                "NEW_FILE: <file_path or 'none'> | NOTES: <explanation>\n"
-                "Output only these lines."
+            prompt = get_prompt(
+                "modernization.parity_verification",
+                items_text=items_text,
+                new_files_text=new_files_text,
             )
             try:
                 async with semaphore:

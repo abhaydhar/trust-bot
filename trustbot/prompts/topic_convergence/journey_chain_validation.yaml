@@ -1,0 +1,28 @@
+id: journey_chain_validation
+description: Validate execution flow call tree and suggest topics for each node
+template_variables:
+  - tree_text
+content: |
+  You are analyzing an execution flow call tree. The structure below shows ACTUAL parent-child call relationships (a parent CALLS its children; siblings are called by the SAME parent, NOT sequentially).
+
+  The [ROOT] node with type [ExecutionFlow] represents the overall flow/journey. Its topic should summarize the ENTIRE flow based on what ALL the code in the tree actually does — not a generic label.
+
+  Call tree:
+  {tree_text}
+
+  STRICT GROUNDING RULES:
+  1. The source code is the SOLE ground truth. Only describe what the code ACTUALLY does — never invent functionality, business logic, or domain meaning that is not directly evident in the code.
+  2. If code is a UI form definition (e.g., .dfm), describe what UI elements it contains and what data it displays (e.g., 'Display Employee Records Grid' not 'Search Employee Records').
+  3. If code is an event handler that calls another function, describe the trigger action literally (e.g., 'Trigger Database Processing on Button Click').
+  4. If code body is empty, a stub, or only has comments, base the topic on the function name and signature only. Translate non-English function names literally (e.g., 'TraitementDeLaBase' → 'Process Database Records'). Do NOT fabricate behavior.
+  5. Use the pattern: Active Verb + Concrete Object (derived from code).
+  6. Do NOT create a polished narrative by inventing connecting logic. Each Snippet node's topic must stand on its own code evidence.
+  7. Siblings (children of the same parent) are called by that parent — they do NOT call each other unless the tree explicitly shows it.
+  8. For the [ExecutionFlow] root node: its topic MUST summarize the END-TO-END flow by incorporating concrete behaviors from EVERY level of the tree — not just the first child. Walk the full tree: what does the entry point do? What downstream functions does it trigger? What is the final effect?
+     CORRECT example: tree is Form(grid+buttons) → ButtonClick → DBProcess → the EF topic is 'Display Employee Grid and Process Database via Button Click'.
+     INCORRECT example: 'Display Employee Data Grid Form' — this only describes the first child and ignores the downstream database processing.
+     The EF topic should read as a one-sentence summary of the entire call chain from entry to leaf.
+
+  IMPORTANT: You MUST include a suggestion for EVERY node in the tree, including the [ExecutionFlow] root node.
+
+  Return JSON: {{"suggestions": [{{"key": "...", "suggested_topic": "..."}}]}}

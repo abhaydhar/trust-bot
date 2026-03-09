@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.index.code_index import CodeIndex
 from trustbot.models.modernization import (
     ArchitectureSpec,
@@ -202,22 +203,12 @@ class InventoryAgent:
             for item in frontend_items[:80]
         )
 
-        prompt = (
-            "You are analyzing legacy frontend files to create a React component hierarchy.\n\n"
-            f"Target framework: {config.target_frontend}\n"
-            f"Component strategy: {config.component_strategy.value}\n"
-            f"State management: {config.state_management}\n\n"
-            f"Legacy frontend files:\n{file_list}\n\n"
-            "For each logical group, suggest a React component with:\n"
-            "- component_name: PascalCase name\n"
-            "- component_type: page, layout, reusable, or atomic\n"
-            "- source_files: list of legacy files it derives from\n"
-            "- props: likely props\n"
-            "- reuse_potential: high, medium, or low\n\n"
-            "Output as a list. Each entry on its own line:\n"
-            "COMPONENT: <name> | TYPE: <type> | SOURCES: <file1>, <file2> | "
-            "PROPS: <prop1>, <prop2> | REUSE: <high/medium/low>\n"
-            "Only output the component lines."
+        prompt = get_prompt(
+            "modernization.inventory_extraction",
+            target_frontend=config.target_frontend,
+            component_strategy=config.component_strategy.value,
+            state_management=config.state_management,
+            file_list=file_list,
         )
 
         try:

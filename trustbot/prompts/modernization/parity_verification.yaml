@@ -1,0 +1,18 @@
+id: parity_verification
+description: Match legacy functions to new codebase (renamed/refactored/merged)
+template_variables:
+  - items_text
+  - new_files_text
+content: |
+  The following legacy functions were NOT found by name in the new codebase.
+  Check if they may have been renamed, refactored, or merged.
+
+  Legacy functions:
+  {items_text}
+
+  New codebase files:
+  {new_files_text}
+
+  For each legacy function, respond:
+  LEGACY: <function> | STATUS: <migrated/partial/missing> | NEW_FILE: <file_path or 'none'> | NOTES: <explanation>
+  Output only these lines.

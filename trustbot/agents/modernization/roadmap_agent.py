@@ -13,6 +13,7 @@ from collections import Counter, defaultdict
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.models.modernization import (
     ArchitectureSpec,
     ComplexityLevel,
@@ -256,23 +257,15 @@ class RoadmapAgent:
             phases_text += f"- Items: {len(p.items)}\n"
             phases_text += f"- Estimated hours: {p.estimated_total_hours:.0f}\n"
 
-        prompt = (
-            "You are creating a detailed migration roadmap document.\n\n"
-            f"Target stack: {config.target_frontend} + {config.target_backend}\n"
-            f"Total files: {len(inventory.items)}\n"
-            f"Frontend components: {len(inventory.component_suggestions)}\n"
-            f"Total estimated hours: {total_hours:.0f}\n\n"
-            f"Phases:{phases_text}\n"
-            f"Critical path: {' -> '.join(critical_path)}\n"
-            f"Risks: {'; '.join(risk_factors) if risk_factors else 'None identified'}\n\n"
-            "Generate a comprehensive migration roadmap in markdown. Include:\n"
-            "1. Executive Summary with timeline\n"
-            "2. Phase-by-phase breakdown with deliverables\n"
-            "3. Resource requirements\n"
-            "4. Risk mitigation strategies\n"
-            "5. Success criteria for each phase\n"
-            "6. Recommended fastest-route approach\n\n"
-            "Be specific and actionable."
+        prompt = get_prompt(
+            "modernization.roadmap_generation",
+            target_stack=f"{config.target_frontend} + {config.target_backend}",
+            total_files=len(inventory.items),
+            frontend_components=len(inventory.component_suggestions),
+            total_hours=f"{total_hours:.0f}",
+            phases_text=phases_text,
+            critical_path=" -> ".join(critical_path),
+            risk_factors="; ".join(risk_factors) if risk_factors else "None identified",
         )
 
         try:

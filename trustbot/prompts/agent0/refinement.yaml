@@ -1,0 +1,15 @@
+id: refinement
+description: Refinement prompt when regex patterns missed function definitions
+template_variables:
+  - missed_lines
+content: |
+  Your previously generated regex patterns MISSED some function definitions in
+  the target codebase.  Below are the lines that contain real function/procedure
+  definitions but were NOT matched by your patterns.
+
+  MISSED LINES (file → line):
+  {missed_lines}
+
+  Analyse these missed lines, update your function_def_patterns and
+  class_def_patterns to cover them.  Return the FULL updated JSON profile
+  (same schema as before) — not just the changed fields.

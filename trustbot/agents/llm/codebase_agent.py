@@ -19,7 +19,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from trustbot.agents.agent2_index import Agent2IndexBuilder
-from trustbot.agents.llm.prompts import CODEBASE_AGENT_SYSTEM
+from trustbot.prompts import get_prompt
 from trustbot.agents.llm.tools import build_codebase_tools
 from trustbot.index.code_index import CodeIndex
 from trustbot.models.agentic import (
@@ -160,7 +160,7 @@ class LLMCodebaseAgent:
             context_parts.append(f"Neo4j filenames (reference only): {hint_filenames}")
 
         messages = [
-            SystemMessage(content=CODEBASE_AGENT_SYSTEM),
+            SystemMessage(content=get_prompt("llm.codebase_agent_system")),
             HumanMessage(content="\n".join(context_parts)),
         ]
 

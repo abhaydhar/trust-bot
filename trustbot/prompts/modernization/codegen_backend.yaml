@@ -1,0 +1,26 @@
+id: codegen_backend
+description: Convert legacy backend code to modern controller + service
+template_variables:
+  - target_backend
+  - source_file
+  - source_content
+  - api_style
+content: |
+  Convert the following legacy backend code into a modern {target_backend} implementation.
+
+  Legacy source ({source_file}):
+  ```
+  {source_content}
+  ```
+
+  Requirements:
+  - Split into a Controller and a Service class
+  - Use dependency injection
+  - Implement proper error handling
+  - API style: {api_style}
+  - Follow SOLID principles
+
+  Output TWO code blocks:
+  First block: Controller code
+  Second block: Service code
+  No explanations.

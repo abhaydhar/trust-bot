@@ -1,0 +1,27 @@
+id: inventory_extraction
+description: Analyze legacy frontend files to create React component hierarchy
+template_variables:
+  - target_frontend
+  - component_strategy
+  - state_management
+  - file_list
+content: |
+  You are analyzing legacy frontend files to create a React component hierarchy.
+
+  Target framework: {target_frontend}
+  Component strategy: {component_strategy}
+  State management: {state_management}
+
+  Legacy frontend files:
+  {file_list}
+
+  For each logical group, suggest a React component with:
+  - component_name: PascalCase name
+  - component_type: page, layout, reusable, or atomic
+  - source_files: list of legacy files it derives from
+  - props: likely props
+  - reuse_potential: high, medium, or low
+
+  Output as a list. Each entry on its own line:
+  COMPONENT: <name> | TYPE: <type> | SOURCES: <file1>, <file2> | PROPS: <prop1>, <prop2> | REUSE: <high/medium/low>
+  Only output the component lines.

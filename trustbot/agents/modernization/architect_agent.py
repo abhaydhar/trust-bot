@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.index.code_index import CodeIndex
 from trustbot.models.modernization import (
     ArchitectureSpec,
@@ -248,13 +249,9 @@ class ArchitectAgent:
     ) -> None:
         """Use the LLM to classify files that heuristics couldn't resolve."""
         file_list = "\n".join(f"- {m.file_path}" for m in unknown_mappings)
-        prompt = (
-            "You are analyzing a legacy codebase for modernization. "
-            "Classify each of the following files into one of these layers:\n"
-            "  presentation, business_logic, data_access, shared, configuration\n\n"
-            f"Files:\n{file_list}\n\n"
-            "Respond with one line per file: <file_path> -> <layer>\n"
-            "Only output the mapping lines, nothing else."
+        prompt = get_prompt(
+            "modernization.architect_analysis",
+            file_list=file_list,
         )
 
         try:
@@ -332,34 +329,21 @@ class ArchitectAgent:
         for m in layer_mappings[:5]:
             sample_files[m.file_path] = m.layer.value
 
-        prompt = (
-            "You are a software architect creating a modernization plan.\n\n"
-            f"## Legacy Codebase Analysis\n"
-            f"- Total files: {len(all_files)}\n"
-            f"- Total functions: {sum(len(f['functions']) for f in all_files.values())}\n"
-            f"- Total call edges: {len(edges)}\n"
-            f"- Languages:\n{lang_summary}\n"
-            f"- Layer distribution:\n{layer_summary}\n"
-            f"- {coupling_summary}\n\n"
-            f"## Target Stack\n"
-            f"- Frontend: {config.target_frontend}\n"
-            f"- Backend: {config.target_backend}\n"
-            f"- Component strategy: {config.component_strategy.value}\n"
-            f"- State management: {config.state_management}\n"
-            f"- CSS framework: {config.css_framework}\n"
-            f"- API style: {config.api_style.value}\n"
-            f"- Additional: {config.additional_requirements or 'None'}\n\n"
-            "Generate a comprehensive **proposed to-be architecture** document in markdown. Include:\n"
-            "1. Executive Summary\n"
-            "2. Current State Analysis (AS-IS)\n"
-            "3. Proposed Architecture (TO-BE) with clear frontend/backend separation\n"
-            "4. Technology Stack Recommendations\n"
-            "5. Component Architecture (how legacy maps to new)\n"
-            "6. API Design Strategy\n"
-            "7. Data Layer Strategy\n"
-            "8. Migration Considerations\n"
-            "9. Risk Assessment\n\n"
-            "Be specific and actionable. Reference the actual file counts and patterns found."
+        prompt = get_prompt(
+            "modernization.architect_fallback",
+            total_files=len(all_files),
+            total_functions=sum(len(f["functions"]) for f in all_files.values()),
+            total_edges=len(edges),
+            lang_summary=lang_summary,
+            layer_summary=layer_summary,
+            coupling_summary=coupling_summary,
+            target_frontend=config.target_frontend,
+            target_backend=config.target_backend,
+            component_strategy=config.component_strategy.value,
+            state_management=config.state_management,
+            css_framework=config.css_framework,
+            api_style=config.api_style.value,
+            additional_requirements=config.additional_requirements or "None",
         )
 
         try:

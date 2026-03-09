@@ -25,46 +25,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from trustbot.indexing.chunker import CodeChunk
+from trustbot.prompts import get_prompt
 
 logger = logging.getLogger("trustbot.indexing.llm_call_extractor")
 
-_PROMPT_VERSION = "v7-strip-noncode-preamble"
-
-# ---------------------------------------------------------------------------
-# Base system prompt (language-agnostic rules)
-# ---------------------------------------------------------------------------
-SYSTEM_PROMPT_BASE = """\
-You are a precise static-code-analysis engine.  Given a code chunk and a list
-of known project functions, identify every function / procedure / method CALL
-made inside the chunk.
-
-RULES — follow them strictly:
-1. Only report actual calls (procedure invocations, function calls, method calls).
-2. Do NOT report:
-   - variable or field declarations
-   - type / class references
-   - module or unit imports
-   - class inheritance or interface declarations
-   - the function's own name (self-reference from its declaration line)
-3. Only report callees whose name appears in the KNOWN FUNCTIONS list.
-4. If the chunk contains zero calls, return an empty array.
-
-Return ONLY a JSON array — no markdown fences, no commentary:
-[{"callee": "ExactFunctionName", "confidence": 0.95}]
-"""
-
-CHUNK_TEMPLATE = """\
-LANGUAGE: {language}
-FILE: {file_path}
-FUNCTION: {function_name}
-
-KNOWN FUNCTIONS in this project:
-{known_functions}
-
-CODE CHUNK:
-```
-{content}
-```"""
+_PROMPT_VERSION = "v8-call-keyword-hint"
 
 MAX_KNOWN_FUNCTIONS_IN_PROMPT = 200
 MAX_CHUNK_CHARS = 6000
@@ -84,9 +49,12 @@ def _get_profile(language: str):
 def _get_system_prompt(language: str) -> str:
     """Build the full system prompt: base rules + language-specific addendum."""
     profile = _get_profile(language)
+    base = get_prompt("indexing.system_prompt_base")
     if profile and profile.llm_call_prompt:
-        return SYSTEM_PROMPT_BASE + profile.llm_call_prompt
-    return SYSTEM_PROMPT_BASE
+        base += profile.llm_call_prompt
+    if profile and profile.call_keyword_patterns:
+        base += "\n\nPay special attention to call-keyword syntax — extract every such invocation you find."
+    return base
 
 
 def _get_skip_tokens(language: str) -> frozenset[str]:
@@ -109,6 +77,36 @@ def _get_bare_id_lookahead(language: str) -> str:
     if profile and profile.bare_id_negative_lookahead:
         return profile.bare_id_negative_lookahead
     return ""
+
+
+def _standalone_identifier_regex(name: str, lookahead: str = "") -> str:
+    """Build regex that matches name only when it is a standalone identifier.
+
+    Excludes matches where the name is a substring of a larger identifier
+    (e.g. TYPE in #TOT-TYPE, MyType) or a variable prefix (e.g. #TYPE in Natural).
+    Generic for all languages.
+    """
+    # Negative lookbehind/lookahead: don't match if preceded/followed by
+    # identifier chars (alphanumeric, underscore, hyphen) or variable
+    # prefixes (#, $, @) used in Natural, Perl, Ruby, etc.
+    not_id_char = r"(?<![a-zA-Z0-9_\-#$@])"
+    not_id_char_after = r"(?![a-zA-Z0-9_\-#$@])"
+    base = not_id_char + re.escape(name) + not_id_char_after
+    if lookahead:
+        base += lookahead
+    return base
+
+
+def _has_standalone_identifier_match(content: str, name: str, lookahead: str = "") -> bool:
+    """Return True if content contains name as a standalone identifier."""
+    pat = re.compile(_standalone_identifier_regex(name, lookahead), re.IGNORECASE)
+    return bool(pat.search(content))
+
+
+def _count_standalone_identifier_matches(content: str, name: str) -> int:
+    """Count occurrences of name as a standalone identifier in content."""
+    pat = re.compile(_standalone_identifier_regex(name), re.IGNORECASE)
+    return len(pat.findall(content))
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +217,25 @@ def _get_call_keyword_patterns(language: str) -> list[re.Pattern]:
     return compiled
 
 
+def _extract_call_keyword_calls(
+    chunk: CodeChunk,
+    known_upper: set[str],
+) -> list[dict]:
+    """Extract calls from call-keyword patterns (CALLNAT, FETCH, PERFORM) on full content."""
+    results = []
+    if not chunk.content:
+        return results
+    seen: set[str] = set()
+    for kw_pat in _get_call_keyword_patterns(chunk.language):
+        for m in kw_pat.finditer(chunk.content):
+            callee = m.group("callee")
+            upper = callee.upper()
+            if upper in known_upper and upper not in seen:
+                seen.add(upper)
+                results.append({"callee": callee, "confidence": 0.80})
+    return results
+
+
 def _regex_fallback(
     chunk: CodeChunk,
     known_upper: set[str],
@@ -258,26 +275,22 @@ def _regex_fallback(
 
     # Strategy A2: call-keyword patterns (e.g. FETCH 'name', CALLNAT 'name')
     # Scans ORIGINAL content — some languages embed call targets in strings.
-    # Self-references are permitted: a call keyword always denotes a genuine call.
-    for kw_pat in _get_call_keyword_patterns(chunk.language):
-        for m in kw_pat.finditer(chunk.content):
-            callee = m.group("callee")
-            upper = callee.upper()
-            if upper in known_upper and upper not in seen:
-                seen.add(upper)
-                results.append({"callee": callee, "confidence": 0.80})
+    for c in _extract_call_keyword_calls(chunk, known_upper):
+        upper = c["callee"].upper()
+        if upper not in seen:
+            seen.add(upper)
+            results.append(c)
 
-    # Strategy B: bare-identifier matching (profile-driven) — scans cleaned content
+    # Strategy B: bare-identifier matching (profile-driven) — scans cleaned content.
+    # Use strict boundaries so we do NOT match when the name is a substring of a
+    # larger identifier (e.g. TYPE in #TOT-TYPE, #TYPE-WK). Generic for all langs.
     if _supports_bare_identifiers(chunk.language):
         lookahead = _get_bare_id_lookahead(chunk.language)
         for func_upper in known_upper:
             if func_upper in seen:
                 continue
             if func_upper == func_upper_self:
-                name_hits = len(re.findall(
-                    r"\b" + re.escape(func_upper) + r"\b",
-                    clean, re.IGNORECASE,
-                ))
+                name_hits = _count_standalone_identifier_matches(clean, func_upper)
                 if name_hits <= 1:
                     continue
             if func_upper in skip:
@@ -286,13 +299,10 @@ def _regex_fallback(
                 continue
             if len(func_upper) < 3:
                 continue
-            bare_regex = r"\b" + re.escape(func_upper) + r"\b"
-            if lookahead:
-                bare_regex += lookahead
-            bare_pat = re.compile(bare_regex, re.IGNORECASE)
-            if bare_pat.search(clean):
-                seen.add(func_upper)
-                results.append({"callee": func_upper, "confidence": 0.60})
+            if not _has_standalone_identifier_match(clean, func_upper, lookahead):
+                continue
+            seen.add(func_upper)
+            results.append({"callee": func_upper, "confidence": 0.60})
 
     return results
 
@@ -360,6 +370,14 @@ async def extract_calls_llm(
                 if row:
                     calls = json.loads(row[0] if isinstance(row, tuple) else row["result_json"])
                     cached += 1
+                    # Merge call-keyword matches from full content (LLM may have truncated input)
+                    kw_calls = _extract_call_keyword_calls(chunk, known_upper)
+                    seen_upper = {c.get("callee", "").upper() for c in calls}
+                    for c in kw_calls:
+                        u = c["callee"].upper()
+                        if u not in seen_upper:
+                            calls.append(c)
+                            seen_upper.add(u)
                     edges = _calls_to_edges(chunk, calls, known_upper)
                     edges = _supplement_bare_identifiers(chunk, edges, known_upper, dfm_names)
                     return _expand_call_sites(chunk, edges)
@@ -370,7 +388,8 @@ async def extract_calls_llm(
         if len(chunk_content) > MAX_CHUNK_CHARS:
             chunk_content = chunk_content[:MAX_CHUNK_CHARS] + "\n... (truncated)"
 
-        user_msg = CHUNK_TEMPLATE.format(
+        user_msg = get_prompt(
+            "indexing.chunk_template",
             language=chunk.language,
             file_path=chunk.file_path,
             function_name=chunk.function_name or "unknown",
@@ -406,6 +425,15 @@ async def extract_calls_llm(
                         cache_conn.commit()
                     except Exception:
                         pass
+
+                # Merge call-keyword matches from full content (LLM may have truncated input)
+                kw_calls = _extract_call_keyword_calls(chunk, known_upper)
+                seen_upper = {c.get("callee", "").upper() for c in calls}
+                for c in kw_calls:
+                    u = c["callee"].upper()
+                    if u not in seen_upper:
+                        calls.append(c)
+                        seen_upper.add(u)
 
                 edges = _calls_to_edges(chunk, calls, known_upper)
                 edges = _supplement_bare_identifiers(chunk, edges, known_upper, dfm_names)
@@ -464,10 +492,7 @@ def _supplement_bare_identifiers(
         if func_upper in already:
             continue
         if func_upper == func_upper_self:
-            name_hits = len(re.findall(
-                r"\b" + re.escape(func_upper) + r"\b",
-                clean, re.IGNORECASE,
-            ))
+            name_hits = _count_standalone_identifier_matches(clean, func_upper)
             if name_hits <= 1:
                 continue
         if func_upper in skip:
@@ -476,13 +501,10 @@ def _supplement_bare_identifiers(
             continue
         if len(func_upper) < 3:
             continue
-        bare_regex = r"\b" + re.escape(func_upper) + r"\b"
-        if lookahead:
-            bare_regex += lookahead
-        pat = re.compile(bare_regex, re.IGNORECASE)
-        if pat.search(clean):
-            supplemented.append((chunk.chunk_id, func_upper, 0.55))
-            already.add(func_upper)
+        if not _has_standalone_identifier_match(clean, func_upper, lookahead):
+            continue
+        supplemented.append((chunk.chunk_id, func_upper, 0.55))
+        already.add(func_upper)
 
     if len(supplemented) > len(existing_edges):
         logger.debug(
@@ -557,9 +579,9 @@ def _calls_to_edges(
             ))
             if name_occurrences <= 1:
                 continue
-        if not re.search(r"\b" + re.escape(upper) + r"\b", content_upper):
+        if not _has_standalone_identifier_match(content_upper, upper):
             logger.debug(
-                "Rejected hallucinated call %s -> %s (not in chunk content)",
+                "Rejected hallucinated call %s -> %s (not standalone in chunk content)",
                 chunk.function_name, callee,
             )
             continue

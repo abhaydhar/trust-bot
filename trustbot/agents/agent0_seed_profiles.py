@@ -415,6 +415,9 @@ NOT CALLS (do NOT report):
 - `INPUT USING MAP 'MapName'` — screen layout reference, NOT a program call.
 - `#VARIABLE = 'ProgramName'` — data assignment, NOT a call, even if the string
   value matches a known program name.
+- Variable names that contain a function name as a substring (e.g. #TOT-TYPE,
+  #TYPE-WK, #TYPE-SAVE) — these are NOT calls to a subroutine named TYPE.
+  Only PERFORM SubroutineName, FETCH 'Name', or CALLNAT 'Name' are calls.
 - `DEFINE DATA`, `END-DEFINE`, `MOVE`, `ASSIGN`, `RESET`, `IF`, `FOR`, `READ`,
   `HISTOGRAM`, `FIND`, `LOOP`, `END-READ`, `ESCAPE`, `WRITE`, `REDEFINE`,
   `COMPRESS`, `FORMAT`, `SET KEY`, `EJECT`, `SKIP`, `DIVIDE` — statements, not calls.

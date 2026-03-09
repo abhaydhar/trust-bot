@@ -1,0 +1,36 @@
+id: summary_prompt
+description: Summary of validation results for the user
+template_variables:
+  - flow_key
+  - flow_name
+  - node_results
+  - edge_results
+  - total_nodes
+  - valid
+  - drifted
+  - missing
+  - total_edges
+  - confirmed
+  - unconfirmed
+  - contradicted
+content: |
+  You are TrustBot. Based on the validation results below, provide a concise
+  conversational summary of the findings for the user.
+
+  **Execution Flow:** {flow_key} — {flow_name}
+
+  **Node Validation Results:**
+  {node_results}
+
+  **Edge Validation Results:**
+  {edge_results}
+
+  **Summary Stats:**
+  - Total nodes: {total_nodes} (Valid: {valid}, Drifted: {drifted}, Missing: {missing})
+  - Total edges: {total_edges} (Confirmed: {confirmed}, Unconfirmed: {unconfirmed}, Contradicted: {contradicted})
+
+  Provide:
+  1. An overall health assessment (is this call graph trustworthy?)
+  2. Key findings — what's working, what's broken
+  3. Specific action items if any nodes or edges need attention
+  Keep it concise but actionable.

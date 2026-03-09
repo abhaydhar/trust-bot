@@ -1,0 +1,50 @@
+id: architect_fallback
+description: Generate proposed to-be architecture document
+template_variables:
+  - total_files
+  - total_functions
+  - total_edges
+  - lang_summary
+  - layer_summary
+  - coupling_summary
+  - target_frontend
+  - target_backend
+  - component_strategy
+  - state_management
+  - css_framework
+  - api_style
+  - additional_requirements
+content: |
+  You are a software architect creating a modernization plan.
+
+  ## Legacy Codebase Analysis
+  - Total files: {total_files}
+  - Total functions: {total_functions}
+  - Total call edges: {total_edges}
+  - Languages:
+  {lang_summary}
+  - Layer distribution:
+  {layer_summary}
+  - {coupling_summary}
+
+  ## Target Stack
+  - Frontend: {target_frontend}
+  - Backend: {target_backend}
+  - Component strategy: {component_strategy}
+  - State management: {state_management}
+  - CSS framework: {css_framework}
+  - API style: {api_style}
+  - Additional: {additional_requirements}
+
+  Generate a comprehensive **proposed to-be architecture** document in markdown. Include:
+  1. Executive Summary
+  2. Current State Analysis (AS-IS)
+  3. Proposed Architecture (TO-BE) with clear frontend/backend separation
+  4. Technology Stack Recommendations
+  5. Component Architecture (how legacy maps to new)
+  6. API Design Strategy
+  7. Data Layer Strategy
+  8. Migration Considerations
+  9. Risk Assessment
+
+  Be specific and actionable. Reference the actual file counts and patterns found.

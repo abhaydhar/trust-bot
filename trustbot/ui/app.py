@@ -430,22 +430,8 @@ async def _generate_tearsheet():
         )
 
         import litellm
-        prompt = (
-            "You are a senior software analyst. Below are raw statistics from "
-            "an indexed codebase. Write a concise analysis in approximately "
-            "200 words using markdown. Cover:\n"
-            "1. What the codebase appears to do (infer from function names, "
-            "languages, and call patterns)\n"
-            "2. Key functionalities and modules\n"
-            "3. Database interaction footprint\n"
-            "4. Number of components/modules and overall scale\n"
-            "5. A brief architectural observation\n\n"
-            "Do NOT include a title/heading — it is rendered separately.\n"
-            "Do NOT include a LOC table — that is rendered separately.\n\n"
-            "Use bullet points and bold headers. Be specific — cite actual "
-            "numbers from the stats.\n\n"
-            f"### Raw Statistics\n```\n{stats_block}```"
-        )
+        from trustbot.prompts import get_prompt
+        prompt = get_prompt("ui.tearsheet_analysis", stats_block=stats_block)
 
         response = await litellm.acompletion(
             model=settings.litellm_model,

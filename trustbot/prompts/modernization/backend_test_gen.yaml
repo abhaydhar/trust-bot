@@ -1,0 +1,17 @@
+id: backend_test_gen
+description: Generate backend test file (pytest/xUnit/Jest)
+template_variables:
+  - spec_list
+  - framework_hint
+content: |
+  Generate a {framework_hint} test file for backend services.
+
+  Test specifications:
+  {spec_list}
+
+  Requirements:
+  - Use {framework_hint}
+  - Mock external dependencies
+  - Test both success and error cases
+
+  Output ONLY the test code.

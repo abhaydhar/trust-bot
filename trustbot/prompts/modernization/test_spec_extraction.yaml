@@ -1,0 +1,14 @@
+id: test_spec_extraction
+description: Generate test specifications from legacy backend functions
+template_variables:
+  - functions_list
+content: |
+  Analyze these legacy backend functions and generate test specifications.
+
+  Functions:
+  {functions_list}
+
+  For each function, generate a test spec in this format:
+  TEST: <test_name> | CATEGORY: <functional/sanity/integration/unit> | FUNCTION: <source_function> | FILE: <source_file> | BEHAVIOR: <expected behavior description>
+
+  Generate functional tests for critical business logic, sanity tests for basic operations, and integration tests for cross-component interactions. Output only TEST lines.

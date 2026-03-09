@@ -14,7 +14,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from trustbot.agents.llm.prompts import ANALYSIS_AGENT_SYSTEM
+from trustbot.prompts import get_prompt
 from trustbot.agents.llm.tools import build_verification_tools
 from trustbot.models.agentic import CallGraphOutput, VerificationResult
 
@@ -65,7 +65,7 @@ class LLMAnalysisAgent:
 
         llm_with_tools = self._llm.bind_tools(self._tools) if self._tools else self._llm
         messages = [
-            SystemMessage(content=ANALYSIS_AGENT_SYSTEM),
+            SystemMessage(content=get_prompt("llm.analysis_agent_system")),
             HumanMessage(content=analysis_prompt),
         ]
 

@@ -29,6 +29,7 @@ from typing import Any
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.models.topic_convergence import (
     NodeTopicAnalysis,
     TopicAnalysisReport,
@@ -466,8 +467,7 @@ class TopicConvergenceAgent:
             if ui_props:
                 ui_context = "; ".join(f"{k}={v}" for k, v in ui_props.items())
 
-        prompt_parts = [
-            "You are a business process naming expert. Analyze this node and respond with JSON.\n",
+        context_parts = [
             f"- Current topic: \"{node.topic or '(missing)'}\"",
             f"- Business summary: \"{node.business_summary}\"",
             f"- Node type: \"{node.node_type}\"",
@@ -482,40 +482,8 @@ class TopicConvergenceAgent:
             f"- Siblings (also called by same parent): {sibling_topics}" if sibling_topics else "",
             f"- Other nodes with same topic: {dup_details}" if dup_details else "",
         ]
-
-        prompt_parts.append(
-            "\nTasks:\n"
-            "1. Rate alignment between topic and business_summary (0.0-1.0).\n"
-            "2. If there are issues OR alignment < 0.7, suggest a new topic name using "
-            "Active Verb + Concrete Object pattern.\n"
-            "3. STRICT GROUNDING RULES (follow these exactly):\n"
-            "   a) The source code is the SOLE ground truth. Only describe what the code "
-            "ACTUALLY does. Never invent functionality not present in the code.\n"
-            "   b) If code shows a specific action (e.g., showmessage → 'Display User "
-            "Message', querying a database → 'Query Employee Database'), the topic must "
-            "reflect that EXACT concrete behavior.\n"
-            "   c) If the code body is empty, a stub, or only has comments, derive the "
-            "topic from the function name and parameter types ONLY. Translate non-English "
-            "names literally (e.g., 'TraitementDeLaBase(Texte, Table)' → 'Process "
-            "Database Table with Text Input'). Do NOT fabricate behavior like 'Apply "
-            "Business Rules' when the code does nothing.\n"
-            "   d) For UI form definitions (.dfm), describe the UI layout and data "
-            "bindings literally (e.g., form with grid bound to EmployeesTable → "
-            "'Display Employee Data Grid Form', button with OnClick → 'Employee Form "
-            "with Action Buttons'). Do NOT invent 'Search' or 'Filter' if no search/"
-            "filter code exists.\n"
-            "   e) For event handlers that just delegate to another function, describe "
-            "the trigger (e.g., 'Invoke Database Processing on Click').\n"
-            "   f) Do NOT fabricate domain terms like 'Business Rules', 'Workflow "
-            "Orchestration', 'Online Management' unless those exact concepts appear in "
-            "the code.\n"
-            "4. Ensure the suggestion is UNIQUE among sibling nodes.\n\n"
-            "Return JSON: {\"alignment_score\": <float>, \"alignment_explanation\": \"...\", "
-            "\"suggested_topic\": \"...\", \"rationale\": \"...\", \"confidence\": <float>}\n"
-            "If no suggestion needed, set suggested_topic to empty string."
-        )
-
-        prompt = "\n".join(p for p in prompt_parts if p)
+        context_lines = "\n".join(p for p in context_parts if p)
+        prompt = get_prompt("topic_convergence.topic_alignment", context_lines=context_lines)
 
         async with sem:
             try:
@@ -727,49 +695,7 @@ class TopicConvergenceAgent:
             if not tree_text:
                 return
 
-            prompt = (
-                "You are analyzing an execution flow call tree. The structure below "
-                "shows ACTUAL parent-child call relationships (a parent CALLS its "
-                "children; siblings are called by the SAME parent, NOT sequentially).\n\n"
-                "The [ROOT] node with type [ExecutionFlow] represents the overall "
-                "flow/journey. Its topic should summarize the ENTIRE flow based on "
-                "what ALL the code in the tree actually does — not a generic label.\n\n"
-                f"Call tree:\n{tree_text}\n\n"
-                "STRICT GROUNDING RULES:\n"
-                "1. The source code is the SOLE ground truth. Only describe what the "
-                "code ACTUALLY does — never invent functionality, business logic, or "
-                "domain meaning that is not directly evident in the code.\n"
-                "2. If code is a UI form definition (e.g., .dfm), describe what UI "
-                "elements it contains and what data it displays (e.g., 'Display "
-                "Employee Records Grid' not 'Search Employee Records').\n"
-                "3. If code is an event handler that calls another function, describe "
-                "the trigger action literally (e.g., 'Trigger Database Processing on "
-                "Button Click').\n"
-                "4. If code body is empty, a stub, or only has comments, base the "
-                "topic on the function name and signature only. Translate non-English "
-                "function names literally (e.g., 'TraitementDeLaBase' → 'Process "
-                "Database Records'). Do NOT fabricate behavior.\n"
-                "5. Use the pattern: Active Verb + Concrete Object (derived from code).\n"
-                "6. Do NOT create a polished narrative by inventing connecting logic. "
-                "Each Snippet node's topic must stand on its own code evidence.\n"
-                "7. Siblings (children of the same parent) are called by that parent — "
-                "they do NOT call each other unless the tree explicitly shows it.\n"
-                "8. For the [ExecutionFlow] root node: its topic MUST summarize the "
-                "END-TO-END flow by incorporating concrete behaviors from EVERY level "
-                "of the tree — not just the first child. Walk the full tree: what does "
-                "the entry point do? What downstream functions does it trigger? What is "
-                "the final effect?\n"
-                "   CORRECT example: tree is Form(grid+buttons) → ButtonClick → "
-                "DBProcess → the EF topic is 'Display Employee Grid and Process "
-                "Database via Button Click'.\n"
-                "   INCORRECT example: 'Display Employee Data Grid Form' — this only "
-                "describes the first child and ignores the downstream database processing.\n"
-                "   The EF topic should read as a one-sentence summary of the entire "
-                "call chain from entry to leaf.\n\n"
-                "IMPORTANT: You MUST include a suggestion for EVERY node in the tree, "
-                "including the [ExecutionFlow] root node.\n\n"
-                "Return JSON: {\"suggestions\": [{\"key\": \"...\", \"suggested_topic\": \"...\"}]}"
-            )
+            prompt = get_prompt("topic_convergence.journey_chain_validation", tree_text=tree_text)
             async with sem:
                 try:
                     resp = await litellm.acompletion(

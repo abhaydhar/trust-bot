@@ -1,0 +1,39 @@
+id: edge_verification
+description: Edge verification prompt for comparing two call graph edges
+template_variables:
+  - neo4j_caller
+  - neo4j_caller_class
+  - neo4j_caller_file
+  - neo4j_callee
+  - neo4j_callee_class
+  - neo4j_callee_file
+  - fs_caller
+  - fs_caller_class
+  - fs_caller_file
+  - fs_callee
+  - fs_callee_class
+  - fs_callee_file
+content: |
+  Determine whether these two call graph edges represent the same function call.
+
+  ## Neo4j Edge (from knowledge graph):
+  - Caller: `{neo4j_caller}` (class: {neo4j_caller_class}, file: {neo4j_caller_file})
+  - Callee: `{neo4j_callee}` (class: {neo4j_callee_class}, file: {neo4j_callee_file})
+
+  ## Codebase Edge (from indexed source code):
+  - Caller: `{fs_caller}` (class: {fs_caller_class}, file: {fs_caller_file})
+  - Callee: `{fs_callee}` (class: {fs_callee_class}, file: {fs_callee_file})
+
+  ## Consider:
+  - Names may differ in qualification: "TForm1.ButtonClick" vs "ButtonClick"
+  - File paths may differ: absolute vs relative, forward vs backslash
+  - Class names may be missing from one side
+  - One side may use a qualified name while the other uses a bare name
+
+  ## Respond with JSON:
+  {{
+    "match": true/false,
+    "confidence": 0.0-1.0,
+    "match_type": "full" | "name_and_file" | "name_only" | "no_match",
+    "reasoning": "brief explanation"
+  }}

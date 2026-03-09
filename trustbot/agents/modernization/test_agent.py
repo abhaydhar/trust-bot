@@ -16,6 +16,7 @@ from pathlib import Path
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.index.code_index import CodeIndex
 from trustbot.models.modernization import (
     ModernizationConfig,
@@ -111,17 +112,8 @@ class TestAgent:
         if not functions_summary:
             return []
 
-        prompt = (
-            "Analyze these legacy backend functions and generate test specifications.\n\n"
-            f"Functions:\n{'chr(10)'.join(functions_summary[:40])}\n\n"
-            "For each function, generate a test spec in this format:\n"
-            "TEST: <test_name> | CATEGORY: <functional/sanity/integration/unit> | "
-            "FUNCTION: <source_function> | FILE: <source_file> | "
-            "BEHAVIOR: <expected behavior description>\n\n"
-            "Generate functional tests for critical business logic, "
-            "sanity tests for basic operations, and integration tests for "
-            "cross-component interactions. Output only TEST lines."
-        )
+        functions_list = "\n".join(functions_summary[:40])
+        prompt = get_prompt("modernization.test_spec_extraction", functions_list=functions_list)
 
         try:
             response = await litellm.acompletion(
@@ -213,16 +205,7 @@ class TestAgent:
         spec_list = "\n".join(
             f"- {s.test_name}: {s.expected_behavior}" for s in specs[:20]
         )
-        prompt = (
-            "Generate a Vitest test file for React components.\n\n"
-            f"Test specifications:\n{spec_list}\n\n"
-            "Requirements:\n"
-            "- Use Vitest + React Testing Library\n"
-            "- Each test should be independent\n"
-            "- Include proper imports\n"
-            "- Use describe/it blocks\n\n"
-            "Output ONLY the test code."
-        )
+        prompt = get_prompt("modernization.frontend_test_gen", spec_list=spec_list)
 
         try:
             response = await litellm.acompletion(
@@ -261,14 +244,10 @@ class TestAgent:
             framework_hint = "Jest"
             ext = ".ts"
 
-        prompt = (
-            f"Generate a {framework_hint} test file for backend services.\n\n"
-            f"Test specifications:\n{spec_list}\n\n"
-            "Requirements:\n"
-            f"- Use {framework_hint}\n"
-            "- Mock external dependencies\n"
-            "- Test both success and error cases\n\n"
-            "Output ONLY the test code."
+        prompt = get_prompt(
+            "modernization.backend_test_gen",
+            spec_list=spec_list,
+            framework_hint=framework_hint,
         )
 
         try:

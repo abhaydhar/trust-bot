@@ -1,0 +1,23 @@
+id: topic_alignment
+description: Business process naming expert - rate alignment and suggest topic
+template_variables:
+  - context_lines
+content: |
+  You are a business process naming expert. Analyze this node and respond with JSON.
+
+  {context_lines}
+
+  Tasks:
+  1. Rate alignment between topic and business_summary (0.0-1.0).
+  2. If there are issues OR alignment < 0.7, suggest a new topic name using Active Verb + Concrete Object pattern.
+  3. STRICT GROUNDING RULES (follow these exactly):
+     a) The source code is the SOLE ground truth. Only describe what the code ACTUALLY does. Never invent functionality not present in the code.
+     b) If code shows a specific action (e.g., showmessage → 'Display User Message', querying a database → 'Query Employee Database'), the topic must reflect that EXACT concrete behavior.
+     c) If the code body is empty, a stub, or only has comments, derive the topic from the function name and parameter types ONLY. Translate non-English names literally (e.g., 'TraitementDeLaBase(Texte, Table)' → 'Process Database Table with Text Input'). Do NOT fabricate behavior like 'Apply Business Rules' when the code does nothing.
+     d) For UI form definitions (.dfm), describe the UI layout and data bindings literally (e.g., form with grid bound to EmployeesTable → 'Display Employee Data Grid Form', button with OnClick → 'Employee Form with Action Buttons'). Do NOT invent 'Search' or 'Filter' if no search/filter code exists.
+     e) For event handlers that just delegate to another function, describe the trigger (e.g., 'Invoke Database Processing on Click').
+     f) Do NOT fabricate domain terms like 'Business Rules', 'Workflow Orchestration', 'Online Management' unless those exact concepts appear in the code.
+  4. Ensure the suggestion is UNIQUE among sibling nodes.
+
+  Return JSON: {{"alignment_score": <float>, "alignment_explanation": "...", "suggested_topic": "...", "rationale": "...", "confidence": <float>}}
+  If no suggestion needed, set suggested_topic to empty string.

@@ -1,0 +1,16 @@
+id: codegen_shared
+description: Generate shared DTO models for API contract
+template_variables:
+  - target_backend
+  - endpoint_list
+content: |
+  Generate shared DTO (Data Transfer Object) models for a {target_backend} API.
+
+  API endpoints detected: {endpoint_list}
+
+  Requirements:
+  - Create request and response DTOs
+  - Use proper type annotations
+  - Include validation attributes where appropriate
+
+  Output a single code block with all DTOs.

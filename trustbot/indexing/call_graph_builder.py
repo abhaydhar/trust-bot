@@ -55,23 +55,23 @@ def _resolve_callee(
 ) -> CodeChunk | None:
     """
     Resolve a callee name to a CodeChunk, preferring chunks in the same
-    directory/project as the caller.
+    file as the caller (internal subroutines), then same directory/project.
 
-    Scoring: (common_prefix_length, stem_match).  The stem_match tie-breaker
-    ensures that DFM-to-handler resolution works correctly — Unit1.dfm
-    prefers handlers in Unit1.pas over identically-named functions in other
-    files (e.g. uMainPourAffichage.pas), even though neither shares a
-    common directory prefix.
+    Scoring: (same_file, common_prefix_length, stem_match).  Same-file
+    resolution ensures internal subroutines (e.g. PERFORM TYPE in RAVII)
+    resolve to the correct chunk, not a homonym in another file.
     """
     candidates = func_to_chunks.get(callee_name.upper())
     if not candidates:
         return None
     if len(candidates) == 1:
         return candidates[0]
+    caller_norm = caller_file.replace("\\", "/").upper()
     caller_stem = _file_stem(caller_file)
     best = max(
         candidates,
         key=lambda c: (
+            1 if c.file_path.replace("\\", "/").upper() == caller_norm else 0,
             _common_prefix_length(c.file_path, caller_file),
             1 if _file_stem(c.file_path) == caller_stem else 0,
         ),

@@ -39,7 +39,10 @@ def _parse_chunk_id(chunk_id: str) -> tuple[str, str, str]:
         if stripped:
             func_name = stripped
             break
-    if func_name == file_path:
+    # Only blank when func_name looks like a path (e.g. "path/to/file.pas").
+    # For extensionless files where the file name equals the main entry (e.g.
+    # RAVII::::RAVII), we must keep func_name so edge_map keys match correctly.
+    if func_name == file_path and ("/" in func_name or "\\" in func_name):
         func_name = ""
     return file_path, class_name, func_name
 

@@ -13,7 +13,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from trustbot.agents.llm.prompts import REPORT_AGENT_SYSTEM
+from trustbot.prompts import get_prompt
 from trustbot.models.agentic import VerificationResult
 
 logger = logging.getLogger("trustbot.agents.llm.report_agent")
@@ -48,7 +48,7 @@ class LLMReportAgent:
         )
 
         messages = [
-            SystemMessage(content=REPORT_AGENT_SYSTEM),
+            SystemMessage(content=get_prompt("llm.report_agent_system")),
             HumanMessage(content=report_prompt),
         ]
 

@@ -1,0 +1,20 @@
+id: chunk_template
+description: Template for code chunk sent to LLM for call extraction
+template_variables:
+  - language
+  - file_path
+  - function_name
+  - known_functions
+  - content
+content: |
+  LANGUAGE: {language}
+  FILE: {file_path}
+  FUNCTION: {function_name}
+
+  KNOWN FUNCTIONS in this project:
+  {known_functions}
+
+  CODE CHUNK:
+  ```
+  {content}
+  ```

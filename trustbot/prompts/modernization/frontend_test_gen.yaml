@@ -1,0 +1,17 @@
+id: frontend_test_gen
+description: Generate Vitest test file for React components
+template_variables:
+  - spec_list
+content: |
+  Generate a Vitest test file for React components.
+
+  Test specifications:
+  {spec_list}
+
+  Requirements:
+  - Use Vitest + React Testing Library
+  - Each test should be independent
+  - Include proper imports
+  - Use describe/it blocks
+
+  Output ONLY the test code.

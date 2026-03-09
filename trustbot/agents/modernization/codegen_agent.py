@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.models.modernization import (
     CodeGenResult,
     GeneratedCodeArtifact,
@@ -197,22 +198,14 @@ class CodeGenAgent:
         """Generate a React component from legacy source."""
         props_str = ", ".join(props) if props else "none"
 
-        prompt = (
-            f"Convert the following legacy code into a modern React TypeScript component.\n\n"
-            f"Component name: {name}\n"
-            f"Component type: {comp_type}\n"
-            f"Props: {props_str}\n"
-            f"State management: {config.state_management}\n"
-            f"CSS framework: {config.css_framework}\n\n"
-            f"Legacy source code:\n```\n{source_content[:6000]}\n```\n\n"
-            "Requirements:\n"
-            "- Use TypeScript with proper type definitions\n"
-            "- Use functional components with hooks\n"
-            "- Implement proper error handling\n"
-            "- Add appropriate props interface\n"
-            f"- Use {config.css_framework} for styling\n"
-            "- Make API calls to the backend service layer\n\n"
-            "Output ONLY the TypeScript/TSX code, no explanations."
+        prompt = get_prompt(
+            "modernization.codegen_frontend",
+            name=name,
+            comp_type=comp_type,
+            props_str=props_str,
+            state_management=config.state_management,
+            css_framework=config.css_framework,
+            source_content=source_content[:6000],
         )
 
         try:
@@ -248,19 +241,12 @@ class CodeGenAgent:
         ext = tmpl["controller_ext"]
         ns = tmpl["namespace_prefix"]
 
-        prompt = (
-            f"Convert the following legacy backend code into a modern {config.target_backend} implementation.\n\n"
-            f"Legacy source ({source_file}):\n```\n{source_content[:6000]}\n```\n\n"
-            "Requirements:\n"
-            "- Split into a Controller and a Service class\n"
-            "- Use dependency injection\n"
-            "- Implement proper error handling\n"
-            f"- API style: {config.api_style.value}\n"
-            "- Follow SOLID principles\n\n"
-            "Output TWO code blocks:\n"
-            "First block: Controller code\n"
-            "Second block: Service code\n"
-            "No explanations."
+        prompt = get_prompt(
+            "modernization.codegen_backend",
+            target_backend=config.target_backend,
+            source_file=source_file,
+            source_content=source_content[:6000],
+            api_style=config.api_style.value,
         )
 
         try:
@@ -306,14 +292,10 @@ class CodeGenAgent:
         if not endpoint_names:
             return []
 
-        prompt = (
-            f"Generate shared DTO (Data Transfer Object) models for a {config.target_backend} API.\n\n"
-            f"API endpoints detected: {', '.join(endpoint_names)}\n\n"
-            "Requirements:\n"
-            "- Create request and response DTOs\n"
-            "- Use proper type annotations\n"
-            "- Include validation attributes where appropriate\n\n"
-            "Output a single code block with all DTOs."
+        prompt = get_prompt(
+            "modernization.codegen_shared",
+            target_backend=config.target_backend,
+            endpoint_list=", ".join(endpoint_names),
         )
 
         try:

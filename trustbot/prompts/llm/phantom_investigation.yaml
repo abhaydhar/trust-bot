@@ -1,0 +1,41 @@
+id: phantom_investigation
+description: Phantom edge investigation prompt
+template_variables:
+  - caller
+  - caller_file
+  - callee
+  - callee_file
+  - index_function_count
+  - project_prefix
+  - root_function
+content: |
+  This edge exists in the Neo4j call graph but was NOT found in the indexed codebase.
+
+  ## Phantom Edge:
+  - Caller: `{caller}` (file: {caller_file})
+  - Callee: `{callee}` (file: {callee_file})
+
+  ## Available Context:
+  - Code index has {index_function_count} functions indexed
+  - Project prefix (scope): {project_prefix}
+  - Root function: {root_function}
+
+  ## Your Task:
+  1. Use code_index_search_function and code_index_get_function_chunk to find if
+     the callee exists in the indexed codebase (maybe under a different name).
+  2. Determine the most likely cause:
+     - Naming mismatch (qualified vs bare)
+     - Wrong project scope
+     - Function was deleted or renamed
+     - Dynamic/indirect call not captured by regex indexing
+     - Form event binding (.dfm) not resolved
+  3. Suggest a specific fix.
+
+  Respond with JSON:
+  {{
+    "found_in_codebase": true/false,
+    "found_as": "alternate name or path if found",
+    "root_cause": "explanation",
+    "fix_suggestion": "actionable fix",
+    "confidence": 0.0-1.0
+  }}

@@ -15,7 +15,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
 
-from trustbot.agents.llm.prompts import NEO4J_AGENT_SYSTEM
+from trustbot.prompts import get_prompt
 from trustbot.agents.llm.tools import build_neo4j_tools
 from trustbot.models.agentic import (
     CallGraphEdge,
@@ -52,7 +52,7 @@ class LLMNeo4jAgent:
         llm_with_tools = self._llm.bind_tools(self._tools)
 
         messages = [
-            SystemMessage(content=NEO4J_AGENT_SYSTEM),
+            SystemMessage(content=get_prompt("llm.neo4j_agent_system")),
             HumanMessage(content=(
                 f"Fetch and analyze the call graph for execution flow: {execution_flow_key}\n\n"
                 "Use the tools to:\n"

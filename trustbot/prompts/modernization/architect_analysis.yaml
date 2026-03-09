@@ -1,0 +1,13 @@
+id: architect_analysis
+description: Classify legacy files into architecture layers
+template_variables:
+  - file_list
+content: |
+  You are analyzing a legacy codebase for modernization. Classify each of the following files into one of these layers:
+    presentation, business_logic, data_access, shared, configuration
+
+  Files:
+  {file_list}
+
+  Respond with one line per file: <file_path> -> <layer>
+  Only output the mapping lines, nothing else.

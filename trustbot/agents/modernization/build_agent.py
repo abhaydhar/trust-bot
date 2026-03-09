@@ -16,6 +16,7 @@ from pathlib import Path
 import litellm
 
 from trustbot.config import settings
+from trustbot.prompts import get_prompt
 from trustbot.models.modernization import (
     BuildAttempt,
     BuildResult,
@@ -347,14 +348,10 @@ class BuildAgent:
     ) -> list[str]:
         """Use LLM to suggest and apply fixes for build errors."""
         truncated_errors = error_output[:3000]
-        prompt = (
-            f"The following {target} build errors occurred:\n\n"
-            f"```\n{truncated_errors}\n```\n\n"
-            "For each error, provide a fix in this format:\n"
-            "FILE: <relative_path>\n"
-            "FIX: <description>\n"
-            "CODE:\n```\n<full corrected file content>\n```\n\n"
-            "Only fix actual compilation errors. Output nothing else."
+        prompt = get_prompt(
+            "modernization.build_fix",
+            target=target,
+            truncated_errors=truncated_errors,
         )
 
         try:

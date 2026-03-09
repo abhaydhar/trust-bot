@@ -14,10 +14,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from trustbot.agents.llm.prompts import (
-    EDGE_VERIFICATION_PROMPT,
-    VERIFICATION_AGENT_SYSTEM,
-)
+from trustbot.prompts import get_prompt
 from trustbot.agents.llm.tools import build_verification_tools
 from trustbot.models.agentic import (
     CallGraphOutput,
@@ -77,7 +74,7 @@ class LLMVerificationAgent:
         llm_with_tools = self._llm.bind_tools(self._tools) if self._tools else self._llm
 
         messages = [
-            SystemMessage(content=VERIFICATION_AGENT_SYSTEM),
+            SystemMessage(content=get_prompt("llm.verification_agent_system")),
             HumanMessage(content=comparison_prompt),
         ]
 
