@@ -119,6 +119,26 @@ def _get_tearsheet_progress() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# KG Coverage Analysis — module-level state survives page reloads
+# ---------------------------------------------------------------------------
+_kg_coverage_result = None  # KGCoverageResult | None
+_kg_coverage_progress: dict = {"pct": 0.0, "step": "", "done": False}
+_kg_coverage_lock = threading.Lock()
+
+
+def _set_kg_coverage_progress(pct: float, step: str, done: bool = False):
+    with _kg_coverage_lock:
+        _kg_coverage_progress["pct"] = pct
+        _kg_coverage_progress["step"] = step
+        _kg_coverage_progress["done"] = done
+
+
+def _get_kg_coverage_progress() -> dict:
+    with _kg_coverage_lock:
+        return dict(_kg_coverage_progress)
+
+
+# ---------------------------------------------------------------------------
 # Async backend handlers
 # ---------------------------------------------------------------------------
 
@@ -1364,20 +1384,22 @@ def create_ui():
         _mode_label = "LLM Agentic" if settings.agentic_mode == "llm" else "Rule-Based"
         ui.markdown(
             f"# TrustBot\n"
-            f"*3-Agent call graph validation: Neo4j vs Indexed Codebase*\n\n"
-            f"**Mode:** {_mode_label} (`TRUSTBOT_AGENTIC_MODE={settings.agentic_mode}`)"
+            # f"**Mode:** {_mode_label} (`TRUSTBOT_AGENTIC_MODE={settings.agentic_mode}`)"
         )
 
         with ui.tabs().classes("w-full") as tabs:
             tab_indexer = ui.tab("1. Code Indexer")
             tab_validate = ui.tab("2. Validate")
-            tab_chunks = ui.tab("3. Chunk Visualizer")
-            tab_chat = ui.tab("4. Chat")
-            tab_mgmt = ui.tab("5. Index Management")
+            tab_kg_coverage = ui.tab("3. KG Coverage")
+            tab_chunks = ui.tab("4. Chunk Visualizer")
+            tab_chat = ui.tab("5. Chat")
+            tab_mgmt = ui.tab("Index Management")
+            tab_mgmt.set_visibility(False)
             tab_db_entity = ui.tab("6. DB Entity Checker")
             tab_topic_conv = ui.tab("7. Topic Convergence")
-            tab_chonkie = ui.tab("8. Chonkie Chunk POC")
-            tab_modernize = ui.tab("9. Modernization")
+            tab_chonkie = ui.tab("Chonkie Chunk POC")
+            tab_chonkie.set_visibility(False)
+            tab_modernize = ui.tab("8. Modernization")
 
         with ui.tab_panels(tabs, value=tab_indexer).classes("w-full"):
 
@@ -1594,26 +1616,6 @@ def create_ui():
                                         "border-top: 4px solid #212121;"
                                     )
 
-                                    # --- Detail rows (nutrition-label style) ---
-                                    def _detail_row(label, value, thick=False):
-                                        border = "border-top: 3px solid #212121;" if thick else "border-top: 1px solid #bdbdbd;"
-                                        with ui.row().classes(
-                                            "w-full justify-between items-center q-py-xs q-px-xs"
-                                        ).style(border):
-                                            ui.label(label).classes("text-weight-bold text-body2")
-                                            ui.label(str(value)).classes("text-body2 text-right").style(
-                                                "max-width: 65%; word-break: break-word;"
-                                            )
-
-                                    _detail_row("Languages", data["languages"], thick=True)
-                                    _detail_row("DB-Related Files", f"{data['db_related_files']:,}")
-                                    _detail_row("Most-Called Functions", data["top_callees"])
-                                    _detail_row("Top Callers", data["top_callers"])
-
-                                    ui.separator().classes("q-my-xs").style(
-                                        "border-top: 8px solid #212121;"
-                                    )
-
                                     # --- LOC by extension table ---
                                     ui.label("Lines of Code by File Type").classes(
                                         "text-subtitle1 text-weight-bolder q-pt-xs"
@@ -1646,6 +1648,26 @@ def create_ui():
                                     ).classes("w-full").props(
                                         "dense flat bordered separator=cell hide-bottom"
                                     )
+
+                                    ui.separator().classes("q-my-xs").style(
+                                        "border-top: 8px solid #212121;"
+                                    )
+
+                                    # --- Detail rows (nutrition-label style) ---
+                                    def _detail_row(label, value, thick=False):
+                                        border = "border-top: 3px solid #212121;" if thick else "border-top: 1px solid #bdbdbd;"
+                                        with ui.row().classes(
+                                            "w-full justify-between items-center q-py-xs q-px-xs"
+                                        ).style(border):
+                                            ui.label(label).classes("text-weight-bold text-body2")
+                                            ui.label(str(value)).classes("text-body2 text-right").style(
+                                                "max-width: 65%; word-break: break-word;"
+                                            )
+
+                                    _detail_row("Languages", data["languages"], thick=True)
+                                    _detail_row("DB-Related Files", f"{data['db_related_files']:,}")
+                                    _detail_row("Most-Called Functions", data["top_callees"])
+                                    _detail_row("Top Callers", data["top_callers"])
 
                                     ui.separator().classes("q-my-xs").style(
                                         "border-top: 4px solid #212121;"
@@ -2222,7 +2244,296 @@ def create_ui():
                 yaml_btn.on_click(_on_yaml_click)
 
             # ═══════════════════════════════════════════════════════════
-            # Tab 3: Chunk Visualizer
+            # Tab 3: KG Coverage
+            # ═══════════════════════════════════════════════════════════
+            with ui.tab_panel(tab_kg_coverage):
+                ui.markdown(
+                    "### Knowledge Graph Coverage\n"
+                    "Analyze how completely the Neo4j knowledge graph covers "
+                    "the indexed codebase. Auto-discovers all node types "
+                    "(Snippet, DecisionNode, LoopEntity, etc.) and reports "
+                    "uncovered files and functions."
+                )
+
+                with ui.row().classes("w-full gap-4 items-end"):
+                    kg_pid_input = ui.input(
+                        label="Project ID", placeholder="e.g. 3191",
+                    ).classes("w-40")
+                    kg_rid_input = ui.input(
+                        label="Run ID", placeholder="e.g. 4970",
+                    ).classes("w-40")
+                    kg_btn = ui.button(
+                        "Analyze Coverage", icon="fact_check", color="deep-purple",
+                    )
+
+                kg_progress_card = ui.card().classes("w-full q-mt-sm")
+                kg_progress_card.set_visibility(False)
+                with kg_progress_card:
+                    with ui.row().classes("w-full items-center gap-3 q-mb-sm"):
+                        kg_spinner = ui.spinner("dots", size="lg", color="deep-purple")
+                        with ui.column().classes("gap-0"):
+                            kg_phase_label = ui.label("Initializing...").classes(
+                                "text-subtitle1 text-weight-bold"
+                            )
+                            kg_pct_label = ui.label("0%").classes(
+                                "text-caption text-grey-7"
+                            )
+                    kg_progress_bar = ui.linear_progress(
+                        value=0, show_value=False, color="deep-purple",
+                    ).classes("w-full rounded-borders").style("height: 8px;")
+
+                kg_result_container = ui.column().classes("w-full")
+                kg_result_container.set_visibility(bool(_kg_coverage_result))
+
+                def _render_kg_coverage(data, container):
+                    """Render the KG coverage result into the container."""
+                    container.clear()
+                    with container:
+                        with ui.card().classes("w-full q-mb-md"):
+                            ui.label("Neo4j Node Inventory").classes(
+                                "text-h6 text-weight-bold q-mb-sm"
+                            )
+                            with ui.row().classes("w-full justify-around q-py-sm"):
+                                for ntc in data.node_type_summary:
+                                    with ui.column().classes("items-center gap-0"):
+                                        ui.label(f"{ntc.count}").classes(
+                                            "text-h5 text-weight-bold"
+                                        )
+                                        ui.label(ntc.label).classes(
+                                            "text-caption text-grey-7"
+                                        )
+                            ui.separator()
+                            ui.label(
+                                f"{data.total_neo4j_nodes} total nodes across "
+                                f"{len(data.files_in_neo4j)} files"
+                            ).classes("text-caption text-grey-7 q-mt-xs")
+
+                            if data.files_in_neo4j:
+                                with ui.expansion(
+                                    "Files in Neo4j", icon="folder_open",
+                                ).classes("w-full q-mt-sm"):
+                                    inv_rows = []
+                                    for fi in data.files_in_neo4j:
+                                        type_str = ", ".join(
+                                            f"{lbl}: {cnt}"
+                                            for lbl, cnt in sorted(fi.node_counts.items())
+                                        )
+                                        inv_rows.append({
+                                            "file": fi.file_name,
+                                            "nodes": fi.total_nodes,
+                                            "types": type_str,
+                                        })
+                                    ui.table(
+                                        columns=[
+                                            {"name": "file", "label": "File", "field": "file", "align": "left", "sortable": True},
+                                            {"name": "nodes", "label": "Nodes", "field": "nodes", "align": "right", "sortable": True},
+                                            {"name": "types", "label": "Node Types", "field": "types", "align": "left"},
+                                        ],
+                                        rows=inv_rows,
+                                        row_key="file",
+                                    ).classes("w-full").props("dense flat bordered hide-bottom")
+
+                        with ui.card().classes("w-full q-mb-md"):
+                            ui.label("Coverage Summary").classes(
+                                "text-h6 text-weight-bold q-mb-sm"
+                            )
+                            with ui.row().classes("w-full justify-around q-py-sm"):
+                                with ui.column().classes("items-center gap-0"):
+                                    ui.label(f"{data.function_coverage_pct:.1f}%").classes(
+                                        "text-h4 text-weight-bolder"
+                                    )
+                                    ui.label("Function Coverage").classes(
+                                        "text-caption text-grey-7"
+                                    )
+                                with ui.column().classes("items-center gap-0"):
+                                    ui.label(f"{data.file_coverage_pct:.1f}%").classes(
+                                        "text-h4 text-weight-bolder"
+                                    )
+                                    ui.label("File Coverage").classes(
+                                        "text-caption text-grey-7"
+                                    )
+
+                            ui.separator()
+
+                            summary_rows = [
+                                {"metric": "Codebase Files", "value": data.total_codebase_files},
+                                {"metric": "Fully Covered Files", "value": data.covered_files},
+                                {"metric": "Partially Covered Files", "value": data.partial_files},
+                                {"metric": "Uncovered Files", "value": data.uncovered_files},
+                                {"metric": "Codebase Functions", "value": data.total_codebase_functions},
+                                {"metric": "Covered Functions", "value": data.covered_functions},
+                                {"metric": "Uncovered Functions", "value": data.uncovered_functions},
+                            ]
+                            ui.table(
+                                columns=[
+                                    {"name": "metric", "label": "Metric", "field": "metric", "align": "left"},
+                                    {"name": "value", "label": "Count", "field": "value", "align": "right"},
+                                ],
+                                rows=summary_rows,
+                                row_key="metric",
+                            ).classes("w-full").props("dense flat bordered hide-bottom")
+
+                        with ui.card().classes("w-full"):
+                            ui.label("Per-File Detail").classes(
+                                "text-h6 text-weight-bold q-mb-sm"
+                            )
+
+                            status_colors = {
+                                "covered": "positive",
+                                "partial": "warning",
+                                "uncovered": "negative",
+                            }
+
+                            for fc in sorted(data.file_coverages, key=lambda f: (
+                                0 if f.status == "uncovered" else 1 if f.status == "partial" else 2,
+                                f.file_name,
+                            )):
+                                if fc.total_functions == 0:
+                                    continue
+                                color = status_colors.get(fc.status, "grey")
+                                badge_text = fc.status.upper()
+                                header_text = (
+                                    f"{fc.file_name} — "
+                                    f"{fc.covered_functions}/{fc.total_functions} functions"
+                                )
+
+                                with ui.expansion(
+                                    header_text, icon="description",
+                                ).classes("w-full q-mb-xs bordered rounded-borders"):
+                                    ui.badge(badge_text, color=color).classes("q-mb-sm")
+                                    if fc.language:
+                                        ui.label(f"Language: {fc.language}").classes(
+                                            "text-caption text-grey-7"
+                                        )
+
+                                    uncovered = [
+                                        f for f in fc.functions if f.status == "uncovered"
+                                    ]
+                                    covered = [
+                                        f for f in fc.functions if f.status == "covered"
+                                    ]
+
+                                    if uncovered:
+                                        ui.label("Uncovered Functions:").classes(
+                                            "text-weight-bold text-negative q-mt-sm"
+                                        )
+                                        for fn in uncovered:
+                                            cls_label = f" ({fn.class_name})" if fn.class_name else ""
+                                            ui.label(
+                                                f"  {fn.function_name}{cls_label}"
+                                            ).classes("text-body2").style(
+                                                "font-family: monospace;"
+                                            )
+
+                                    if covered:
+                                        with ui.expansion(
+                                            f"Covered Functions ({len(covered)})",
+                                        ).classes("q-mt-sm"):
+                                            for fn in covered:
+                                                cls_label = f" ({fn.class_name})" if fn.class_name else ""
+                                                tier = fn.match_tier
+                                                lbl = fn.matched_node_label
+                                                ui.label(
+                                                    f"  {fn.function_name}{cls_label} "
+                                                    f"[{tier}, {lbl}]"
+                                                ).classes("text-body2 text-positive").style(
+                                                    "font-family: monospace;"
+                                                )
+
+                if _kg_coverage_result:
+                    _render_kg_coverage(_kg_coverage_result, kg_result_container)
+
+                async def _on_kg_coverage_click():
+                    global _kg_coverage_result
+
+                    pid_str = (kg_pid_input.value or "").strip()
+                    rid_str = (kg_rid_input.value or "").strip()
+                    if not pid_str or not rid_str:
+                        ui.notify("Please enter Project ID and Run ID.",
+                                  type="warning", position="bottom-right")
+                        return
+
+                    try:
+                        pid = int(pid_str)
+                        rid = int(rid_str)
+                    except ValueError:
+                        ui.notify("Project ID and Run ID must be integers.",
+                                  type="warning", position="bottom-right")
+                        return
+
+                    if _git_index is None:
+                        ui.notify("No codebase indexed yet. Index a codebase first.",
+                                  type="warning", position="bottom-right")
+                        return
+
+                    kg_btn.disable()
+                    kg_progress_card.set_visibility(True)
+                    kg_result_container.set_visibility(False)
+                    kg_spinner.set_visibility(True)
+                    kg_progress_bar.set_value(0)
+                    kg_phase_label.set_text("Starting...")
+                    kg_pct_label.set_text("0%")
+                    _set_kg_coverage_progress(0.0, "Starting...")
+
+                    ui.notify("KG Coverage analysis started...",
+                              type="info", position="bottom-right", timeout=3000)
+
+                    poll_timer = ui.timer(0.5, lambda: _kg_poll_progress(
+                        kg_progress_bar, kg_phase_label, kg_pct_label,
+                    ))
+
+                    try:
+                        registry = await _get_registry_async()
+                        neo4j_tool = registry.get("neo4j")
+                        if neo4j_tool is None:
+                            raise RuntimeError("Neo4j tool not available in registry")
+
+                        from trustbot.agents.kg_coverage_agent import KGCoverageAgent
+                        agent = KGCoverageAgent(neo4j_tool, _git_index)
+                        result = await agent.analyze(
+                            pid, rid,
+                            progress_callback=_set_kg_coverage_progress,
+                        )
+                        _kg_coverage_result = result
+                    except Exception as exc:
+                        logger.exception("KG Coverage analysis failed")
+                        result = None
+                        ui.notify(f"Error: {exc}", type="negative",
+                                  position="bottom-right", timeout=8000)
+                    finally:
+                        poll_timer.deactivate()
+
+                    try:
+                        kg_progress_bar.set_value(1.0)
+                        kg_pct_label.set_text("100%")
+                        kg_spinner.set_visibility(False)
+                        kg_phase_label.set_text("Complete")
+                        kg_progress_card.set_visibility(False)
+
+                        if result is not None:
+                            _render_kg_coverage(result, kg_result_container)
+                            kg_result_container.set_visibility(True)
+                            ui.notify("KG Coverage analysis complete!",
+                                      type="positive", position="bottom-right")
+
+                        kg_btn.enable()
+                    except RuntimeError:
+                        pass
+
+                def _kg_poll_progress(bar, phase_lbl, pct_lbl):
+                    state = _get_kg_coverage_progress()
+                    try:
+                        bar.set_value(state["pct"])
+                        pct_lbl.set_text(f"{int(state['pct'] * 100)}%")
+                        if state["step"]:
+                            phase_lbl.set_text(state["step"])
+                    except RuntimeError:
+                        pass
+
+                kg_btn.on_click(_on_kg_coverage_click)
+
+            # ═══════════════════════════════════════════════════════════
+            # Tab 4: Chunk Visualizer
             # ═══════════════════════════════════════════════════════════
             with ui.tab_panel(tab_chunks):
                 ui.markdown(
@@ -2788,6 +3099,28 @@ def create_ui():
                                 tc_apply_selected_btn = ui.button(
                                     "Apply All Selected", color="positive",
                                 ).props("outline")
+                                ui.separator().classes("q-my-sm")
+                                ui.label("Issue Categories Reference").classes(
+                                    "text-subtitle2 text-weight-bold text-grey-8"
+                                )
+                                ui.table(
+                                    columns=[
+                                        {"name": "category", "label": "Category", "field": "category", "align": "left"},
+                                        {"name": "value", "label": "Value", "field": "value", "align": "left"},
+                                        {"name": "method", "label": "Detection Method", "field": "method", "align": "left"},
+                                        {"name": "description", "label": "What it Checks", "field": "description", "align": "left"},
+                                    ],
+                                    rows=[
+                                        {"category": "Topic Missing", "value": "topic_missing", "method": "Rule-based", "description": "topic field is empty/null"},
+                                        {"category": "Verb-Noun", "value": "verb_noun", "method": "Rule-based", "description": "First word not in approved verbs list"},
+                                        {"category": "Technical Glue", "value": "technical_glue", "method": "Rule-based", "description": "Contains generic plumbing words"},
+                                        {"category": "Duplicate", "value": "duplicate", "method": "Rule-based (set comparison)", "description": "Exact same topic on 2+ nodes"},
+                                        {"category": "Similar", "value": "similar", "method": "Rule-based (fuzzy)", "description": "85%+ SequenceMatcher similarity"},
+                                        {"category": "Misaligned", "value": "misaligned", "method": "LLM", "description": "topic vs business_summary alignment < 0.7"},
+                                        {"category": "Journey Break", "value": "journey_break", "method": "LLM", "description": "Topic doesn't fit the call tree flow narrative"},
+                                    ],
+                                    row_key="value",
+                                ).classes("w-full").props("dense flat bordered separator=cell hide-bottom")
                             tc_all_table_container = ui.column().classes("w-full")
 
                         # ── Duplicate Groups sub-tab ──
@@ -2906,12 +3239,8 @@ def create_ui():
                             return
 
                         columns = [
-                            {"name": "key", "label": "Node Key", "field": "key", "sortable": True},
                             {"name": "node_type", "label": "Type", "field": "node_type", "sortable": True},
-                            {"name": "parent", "label": "Parent Snippet", "field": "parent", "sortable": True},
-                            {"name": "ef", "label": "Execution Flow", "field": "ef", "sortable": True},
                             {"name": "topic", "label": "Current Topic", "field": "topic", "sortable": True},
-                            {"name": "business_summary", "label": "Business Summary", "field": "business_summary"},
                             {"name": "issues", "label": "Issues", "field": "issues", "sortable": True},
                             {"name": "suggestion", "label": "Suggested Topic", "field": "suggestion"},
                             {"name": "similarity", "label": "Similarity", "field": "similarity", "sortable": True},
