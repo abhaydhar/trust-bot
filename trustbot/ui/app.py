@@ -1400,6 +1400,7 @@ def create_ui():
             tab_chonkie = ui.tab("Chonkie Chunk POC")
             tab_chonkie.set_visibility(False)
             tab_modernize = ui.tab("8. Modernization")
+            tab_yaml_checklist = ui.tab("9. BP YAML Checklist")
 
         with ui.tab_panels(tabs, value=tab_indexer).classes("w-full"):
 
@@ -4517,3 +4518,210 @@ def create_ui():
                 mod_phase1_btn.on_click(_on_mod_phase1)
                 mod_phase2_btn.on_click(_on_mod_phase2)
                 mod_phase3_btn.on_click(_on_mod_phase3)
+
+            # ═══════════════════════════════════════════════════════════
+            # Tab 10: YAML Checklist
+            # ═══════════════════════════════════════════════════════════
+            with ui.tab_panel(tab_yaml_checklist):
+                ui.markdown(
+                    "### YAML Quality Checklist\n"
+                    "Validate Neo4j nodes and relationships against the 29 items "
+                    "in the YAML Generation Quality Checklist. Enter Project ID and Run ID "
+                    "to run validation and generate a report highlighting node keys where "
+                    "checklist items failed or were not implemented."
+                )
+
+                with ui.row().classes("w-full gap-4 items-end"):
+                    yaml_pid_input = ui.input(
+                        label="Project ID", placeholder="e.g. 3151",
+                    ).classes("w-40")
+                    yaml_rid_input = ui.input(
+                        label="Run ID", placeholder="e.g. 4912",
+                    ).classes("w-40")
+                    yaml_validate_btn = ui.button(
+                        "Validate Checklist", icon="checklist", color="teal",
+                    )
+
+                yaml_progress_card = ui.card().classes("w-full q-mt-sm")
+                yaml_progress_card.set_visibility(False)
+                with yaml_progress_card:
+                    with ui.row().classes("w-full items-center gap-3 q-mb-sm"):
+                        yaml_spinner = ui.spinner("dots", size="lg", color="teal")
+                        with ui.column().classes("gap-0"):
+                            yaml_phase_label = ui.label("Initializing...").classes(
+                                "text-subtitle1 text-weight-bold"
+                            )
+                            yaml_pct_label = ui.label("0%").classes(
+                                "text-caption text-grey-7"
+                            )
+                    yaml_progress_bar = ui.linear_progress(
+                        value=0, show_value=False, color="teal",
+                    ).classes("w-full rounded-borders").style("height: 8px;")
+
+                yaml_result_container = ui.column().classes("w-full")
+                yaml_result_container.set_visibility(False)
+
+                def _render_yaml_checklist_report(report, container):
+                    """Render the YAML checklist report into the container."""
+                    container.clear()
+                    with container:
+                        summary = report.summary
+                        if summary.get("error"):
+                            ui.markdown(
+                                f"## YAML Checklist Report\n\n"
+                                f"**Project ID:** {report.project_id} | "
+                                f"**Run ID:** {report.run_id}\n\n"
+                                f"**Error:** {summary['error']}"
+                            )
+                            return
+                        passed = summary.get("passed", 0)
+                        failed = summary.get("failed", 0)
+                        critical_failed = summary.get("critical_failed", 0)
+                        required_failed = summary.get("required_failed", 0)
+                        total = len(report.items)
+                        score_color = (
+                            "green" if failed == 0
+                            else "orange" if critical_failed == 0
+                            else "red"
+                        )
+                        with ui.card().classes("w-full q-mb-md"):
+                            ui.label("Summary").classes(
+                                "text-h6 text-weight-bold q-mb-sm"
+                            )
+                            ui.markdown(
+                                f"**Project ID:** {report.project_id} | "
+                                f"**Run ID:** {report.run_id}\n\n"
+                                f"**Passed:** {passed}/{total} | "
+                                f"**Failed:** {failed} "
+                                f"(Critical: {critical_failed}, Required: {required_failed})"
+                            ).classes(f"text-{score_color}-8")
+                            ui.separator()
+                            with ui.row().classes("w-full justify-around q-py-sm"):
+                                with ui.column().classes("items-center gap-0"):
+                                    ui.label(f"{passed}/{total}").classes(
+                                        "text-h4 text-weight-bolder"
+                                    )
+                                    ui.label("Passed").classes(
+                                        "text-caption text-grey-7"
+                                    )
+                                with ui.column().classes("items-center gap-0"):
+                                    ui.label(str(critical_failed)).classes(
+                                        "text-h4 text-weight-bolder text-red-8"
+                                    )
+                                    ui.label("Critical Failed").classes(
+                                        "text-caption text-grey-7"
+                                    )
+                                with ui.column().classes("items-center gap-0"):
+                                    ui.label(str(required_failed)).classes(
+                                        "text-h4 text-weight-bolder text-orange-8"
+                                    )
+                                    ui.label("Required Failed").classes(
+                                        "text-caption text-grey-7"
+                                    )
+
+                        accordion_classes = "w-full rounded-borders bordered q-mb-sm"
+                        accordion_header_class = "bg-grey-7 text-white"
+                        accordion_body_classes = "bg-white q-pa-md"
+
+                        for category in ["Nodes", "Relationships", "Execution Order", "Connectivity"]:
+                            cat_items = [i for i in report.items if i.category == category]
+                            if not cat_items:
+                                continue
+                            failed_count = sum(1 for i in cat_items if not i.passed)
+                            header_icon = "check_circle" if failed_count == 0 else "warning"
+                            with ui.expansion(
+                                f"{category} ({len(cat_items) - failed_count}/{len(cat_items)} passed)",
+                                icon=header_icon,
+                            ).classes(accordion_classes) as exp:
+                                exp.props["header-class"] = accordion_header_class
+                                with ui.element("div").classes(accordion_body_classes):
+                                    for item in cat_items:
+                                        status_icon = "check_circle" if item.passed else "cancel"
+                                        status_color = "green" if item.passed else (
+                                            "red" if item.priority == "Critical" else "orange"
+                                        )
+                                        with ui.row().classes("w-full gap-2 items-start q-mb-sm"):
+                                            ui.icon(status_icon).classes(
+                                                f"text-{status_color}-7"
+                                            )
+                                            with ui.column().classes("gap-0 flex-grow"):
+                                                ui.label(
+                                                    f"#{item.item_id}: {item.title}"
+                                                ).classes("text-weight-medium")
+                                                ui.label(
+                                                    f"Priority: {item.priority}"
+                                                ).classes("text-caption text-grey-7")
+                                                if not item.passed and item.failed_keys:
+                                                    keys_str = ", ".join(
+                                                        str(k) for k in item.failed_keys[:10]
+                                                    )
+                                                    if len(item.failed_keys) > 10:
+                                                        keys_str += f" ... (+{len(item.failed_keys) - 10} more)"
+                                                    ui.label(
+                                                        f"Failed keys: {keys_str}"
+                                                    ).classes(
+                                                        "text-caption text-red-8"
+                                                    )
+                                                if item.details:
+                                                    ui.label(item.details).classes(
+                                                        "text-caption text-grey-7"
+                                                    )
+
+                async def _on_yaml_validate_click():
+                    p_str = (yaml_pid_input.value or "").strip()
+                    r_str = (yaml_rid_input.value or "").strip()
+                    if not p_str or not r_str:
+                        ui.notify(
+                            "Please enter both Project ID and Run ID.",
+                            type="warning",
+                        )
+                        return
+                    try:
+                        project_id = int(p_str)
+                        run_id = int(r_str)
+                    except ValueError:
+                        ui.notify(
+                            "Project ID and Run ID must be integers.",
+                            type="negative",
+                        )
+                        return
+
+                    yaml_validate_btn.disable()
+                    yaml_progress_card.set_visibility(True)
+                    yaml_progress_bar.set_value(0)
+                    yaml_phase_label.set_text("Fetching Neo4j data...")
+
+                    try:
+                        registry = await _get_registry_async()
+                        neo4j_tool = registry.get("neo4j")
+                        from trustbot.validation.yaml_checklist_validator import (
+                            YamlChecklistValidator,
+                        )
+                        validator = YamlChecklistValidator(neo4j_tool)
+
+                        def _yaml_progress(pct, msg):
+                            yaml_progress_bar.set_value(pct)
+                            yaml_phase_label.set_text(msg)
+                            yaml_pct_label.set_text(f"{int(pct * 100)}%")
+
+                        report = await validator.validate(
+                            project_id, run_id,
+                            progress_callback=_yaml_progress,
+                        )
+                        yaml_result_container.set_visibility(True)
+                        _render_yaml_checklist_report(report, yaml_result_container)
+                    except Exception as exc:
+                        logger.exception("YAML checklist validation failed")
+                        yaml_result_container.set_visibility(True)
+                        yaml_result_container.clear()
+                        with yaml_result_container:
+                            ui.markdown(
+                                f"**Validation failed:** {exc}"
+                            ).classes("text-red-8")
+                    finally:
+                        yaml_validate_btn.enable()
+                        yaml_progress_card.set_visibility(False)
+                        yaml_progress_bar.set_value(1.0)
+                        yaml_phase_label.set_text("Done")
+
+                yaml_validate_btn.on_click(_on_yaml_validate_click)
