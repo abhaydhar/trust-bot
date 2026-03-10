@@ -6,7 +6,7 @@ template_variables:
   - state_management
   - file_list
 content: |
-  You are analyzing legacy frontend files to create a React component hierarchy.
+  You are analyzing legacy {language} frontend files to create a React component hierarchy.
 
   Target framework: {target_frontend}
   Component strategy: {component_strategy}

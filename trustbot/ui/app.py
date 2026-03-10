@@ -223,6 +223,8 @@ async def _index_local_folder(folder_path: str, progress_cb=None):
 
         if profiles:
             set_language_profiles(profiles)
+            from trustbot.state import set_language_pack
+            set_language_pack(list(profiles.keys()))
 
         if progress_cb:
             progress_cb(0.15, f"Detected {len(profiles)} language(s), chunking...")

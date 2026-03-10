@@ -3,7 +3,7 @@ description: Classify legacy files into architecture layers
 template_variables:
   - file_list
 content: |
-  You are analyzing a legacy codebase for modernization. Classify each of the following files into one of these layers:
+  You are analyzing a legacy {language} codebase for modernization. Classify each of the following files into one of these layers:
     presentation, business_logic, data_access, shared, configuration
 
   Files:

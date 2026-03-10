@@ -63,11 +63,13 @@ class GitCodeIndexer:
 
             from trustbot.agents.agent0_language import Agent0LanguageProfiler
             from trustbot.indexing.chunker import set_language_profiles
+            from trustbot.state import set_language_pack
 
             agent0 = Agent0LanguageProfiler(self._temp_dir)
             profiles = await agent0.run()
             if profiles:
                 set_language_profiles(profiles)
+                set_language_pack(list(profiles.keys()))
 
             if progress_callback:
                 progress_callback(0.35, "Scanning files...")

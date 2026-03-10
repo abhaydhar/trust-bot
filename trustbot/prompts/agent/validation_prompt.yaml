@@ -9,7 +9,7 @@ template_variables:
   - callee_file
   - caller_code
 content: |
-  I need you to validate this call graph edge.
+  I need you to validate this call graph edge. The codebase uses {language}.
 
   **Caller function:** `{caller_function}` in `{caller_file}` (lines {caller_start}-{caller_end})
   **Expected callee:** `{callee_function}` in `{callee_file}`
