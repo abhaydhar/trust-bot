@@ -4652,16 +4652,34 @@ def create_ui():
                                                     f"Priority: {item.priority}"
                                                 ).classes("text-caption text-grey-7")
                                                 if not item.passed and item.failed_keys:
-                                                    keys_str = ", ".join(
-                                                        str(k) for k in item.failed_keys[:10]
-                                                    )
-                                                    if len(item.failed_keys) > 10:
-                                                        keys_str += f" ... (+{len(item.failed_keys) - 10} more)"
-                                                    ui.label(
-                                                        f"Failed keys: {keys_str}"
-                                                    ).classes(
-                                                        "text-caption text-red-8"
-                                                    )
+                                                    with ui.row().classes("gap-1 items-center flex-wrap"):
+                                                        ui.label("Failed keys:").classes(
+                                                            "text-caption text-red-8"
+                                                        )
+                                                        keys_str = ", ".join(
+                                                            str(k) for k in item.failed_keys[:10]
+                                                        )
+                                                        ui.label(keys_str).classes(
+                                                            "text-caption text-red-8"
+                                                        )
+                                                        if len(item.failed_keys) > 10:
+                                                            more_count = len(item.failed_keys) - 10
+                                                            with ui.expansion(
+                                                                f"+{more_count} more (click to view all)",
+                                                                icon="expand_more",
+                                                            ).classes(
+                                                                "text-caption text-red-8 "
+                                                                "cursor-pointer"
+                                                            ).props("dense"):
+                                                                with ui.column().classes(
+                                                                    "gap-1 q-pl-md q-pt-xs max-h-60 overflow-y-auto"
+                                                                ):
+                                                                    for k in item.failed_keys:
+                                                                        ui.label(
+                                                                            str(k)
+                                                                        ).classes(
+                                                                            "text-caption text-red-8 font-mono"
+                                                                        )
                                                 if item.details:
                                                     ui.label(item.details).classes(
                                                         "text-caption text-grey-7"
